@@ -1,0 +1,145 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Page {
+  id              String    @id @default(uuid())
+  slug            String    @unique
+  entityName      String    @map("entity_name")
+  entityType      String    @default("other") @map("entity_type")
+  contentMarkdown String    @default("") @map("content_markdown")
+  sourceBlocks    Json      @default("[]") @map("source_blocks")
+  versionNumber   Int       @default(1) @map("version_number")
+  origin          String    @default("ai-extracted")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  lastModified    DateTime  @default(now()) @map("last_modified")
+  conflictStatus  String?   @map("conflict_status")
+
+  versions          Version[]
+  sourceChunks      SourceChunk[]
+  crossLinksFrom    CrossLink[]       @relation("source")
+  crossLinksTo      CrossLink[]       @relation("target")
+  pendingIngestions PendingIngestion[]
+  images            Image[]
+
+  @@map("pages")
+}
+
+model Version {
+  id              String   @id @default(uuid())
+  pageId          String   @map("page_id")
+  versionNumber   Int      @map("version_number")
+  contentMarkdown String   @map("content_markdown")
+  sourceBlocks    Json     @default("[]") @map("source_blocks")
+  origin          String
+  createdAt       DateTime @default(now()) @map("created_at")
+  changeSummary   String?  @map("change_summary")
+
+  page Page @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  @@unique([pageId, versionNumber])
+  @@map("versions")
+}
+
+model SourceChunk {
+  id             String   @id @default(uuid())
+  docFilename    String   @map("doc_filename")
+  headingPath    String[] @map("heading_path")
+  paragraphIndex Int      @map("paragraph_index")
+  blockType      String   @default("paragraph") @map("block_type")
+  text           String
+  contentHash    String   @map("content_hash")
+  entityName     String?  @map("entity_name")
+  entityType     String?  @map("entity_type")
+  sectionType    String?  @map("section_type")
+  confidence     Float    @default(0)
+  pageId         String?  @map("page_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+  ingestionRunId String?  @map("ingestion_run_id")
+
+  page Page? @relation(fields: [pageId], references: [id], onDelete: SetNull)
+
+  @@unique([docFilename, paragraphIndex, contentHash])
+  @@map("source_chunks")
+}
+
+model CrossLink {
+  id             String @id @default(uuid())
+  sourcePageId   String @map("source_page_id")
+  targetPageId   String @map("target_page_id")
+  mentionContext String? @map("mention_context")
+
+  sourcePage Page @relation("source", fields: [sourcePageId], references: [id], onDelete: Cascade)
+  targetPage Page @relation("target", fields: [targetPageId], references: [id], onDelete: Cascade)
+
+  @@unique([sourcePageId, targetPageId])
+  @@map("cross_links")
+}
+
+model Image {
+  id          String   @id @default(uuid())
+  pageId      String?  @map("page_id")
+  filename    String
+  altText     String?  @map("alt_text")
+  caption     String?
+  url         String
+  sourceDoc   String?  @map("source_doc")
+  isPrimary   Boolean  @default(false) @map("is_primary")
+  origin      String   @default("ai-extracted")
+  sortOrder   Int      @default(0) @map("sort_order")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  page Page? @relation(fields: [pageId], references: [id], onDelete: SetNull)
+
+  @@map("images")
+}
+
+model PendingIngestion {
+  id                      String    @id @default(uuid())
+  pageId                  String    @map("page_id")
+  incomingContentMarkdown String    @map("incoming_content_markdown")
+  incomingSourceBlocks    Json      @default("[]") @map("incoming_source_blocks")
+  docFilename             String    @map("doc_filename")
+  ingestionRunId          String?   @map("ingestion_run_id")
+  createdAt               DateTime  @default(now()) @map("created_at")
+  resolved                Boolean   @default(false)
+  resolvedAt              DateTime? @map("resolved_at")
+  resolution              String?
+
+  page Page @relation(fields: [pageId], references: [id], onDelete: Cascade)
+
+  @@map("pending_ingestions")
+}
+
+model Document {
+  id              String   @id @default(uuid())
+  filename        String   @unique
+  fileHash        String   @map("file_hash")
+  pageCount       Int?     @map("page_count")
+  chunkCount      Int      @default(0) @map("chunk_count")
+  firstIngestedAt DateTime @default(now()) @map("first_ingested_at")
+  lastIngestedAt  DateTime @default(now()) @map("last_ingested_at")
+  ingestionStatus String   @default("pending") @map("ingestion_status")
+
+  @@map("documents")
+}
+
+model IndexBuildLog {
+  id              String    @id @default(uuid())
+  startedAt       DateTime  @map("started_at")
+  completedAt     DateTime? @map("completed_at")
+  status          String    @default("running")
+  chunksIndexed   Int       @default(0) @map("chunks_indexed")
+  pagesIndexed    Int       @default(0) @map("pages_indexed")
+  durationSeconds Float?    @map("duration_seconds")
+  errorMessage    String?   @map("error_message")
+  embeddingModel  String    @map("embedding_model")
+  buildTrigger    String    @default("manual") @map("build_trigger")
+
+  @@map("index_build_log")
+}
