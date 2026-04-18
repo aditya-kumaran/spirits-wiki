@@ -1,5 +1,13 @@
 """Configuration for the ingestion pipeline."""
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Auto-load .env and .env.local from the project root
+_project_root = Path(__file__).resolve().parent.parent
+load_dotenv(_project_root / ".env.local", override=True)
+load_dotenv(_project_root / ".env", override=True)
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")

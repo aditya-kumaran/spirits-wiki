@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 import psycopg2
 
 sys.path.insert(0, os.path.dirname(__file__))
-from config import DATABASE_URL
+from config import DATABASE_URL  # noqa: E402 — config.py auto-loads .env/.env.local
 
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 EMBEDDING_DIM = 384
