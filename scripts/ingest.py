@@ -23,15 +23,15 @@ from pathlib import Path
 
 import psycopg2
 from psycopg2.extras import Json
-from groq import Groq
 
 # Add scripts dir to path
 sys.path.insert(0, os.path.dirname(__file__))
 
-from config import DATABASE_URL, GROQ_API_KEY, GROQ_MODEL, DOCX_DIR, MIN_CONFIDENCE, MIN_TEXT_LENGTH
+from config import DATABASE_URL, LLM_PROVIDER, DOCX_DIR, MIN_CONFIDENCE, MIN_TEXT_LENGTH
 from parse_docx import parse_docx, ContentBlock, ExtractedImage
 from classify_entities import classify_block, EntityClassification
 from synthesize_content import synthesize_wiki_page
+from llm_client import create_llm_client, LLMClient
 
 
 def get_db_connection():
@@ -106,7 +106,7 @@ def extract_wiki_links(content_md: str) -> list:
     return re.findall(r'\[\[([^\]]+)\]\]', content_md)
 
 
-def store_entity_page(entity_name, entity_type, items, file_path, ingestion_run_id, llm_client, model):
+def store_entity_page(entity_name, entity_type, items, file_path, ingestion_run_id, llm_client, is_local_llm=False):
     """
     Store a single entity's page in the database.
     Synthesizes content using LLM with citations.
@@ -118,11 +118,12 @@ def store_entity_page(entity_name, entity_type, items, file_path, ingestion_run_
 
     # Synthesize wiki content with citations
     print(f"    Synthesizing: {entity_name} ({len(items)} blocks)...")
-    content_md = synthesize_wiki_page(entity_name, entity_type, items, llm_client, model)
+    content_md = synthesize_wiki_page(entity_name, entity_type, items, llm_client)
     source_blocks_json = assemble_source_blocks_json(items)
 
-    # Rate limit between synthesis calls
-    time.sleep(2)
+    # Rate limit between synthesis calls (only needed for cloud APIs)
+    if not is_local_llm:
+        time.sleep(2)
 
     conn = get_db_connection()
     try:
@@ -281,7 +282,7 @@ def generate_cross_links(entity_blocks: dict, page_ids: dict):
         conn.close()
 
 
-def ingest_document(file_path: Path, llm_client: Groq, min_blocks: int = 2):
+def ingest_document(file_path: Path, llm_client: LLMClient, min_blocks: int = 2, is_local_llm: bool = False):
     """Ingest a single .docx file into the database."""
     ingestion_run_id = str(uuid.uuid4())
     file_hash = hashlib.sha256(file_path.read_bytes()).hexdigest()
@@ -318,15 +319,15 @@ def ingest_document(file_path: Path, llm_client: Groq, min_blocks: int = 2):
         if block.block_type == "heading" and len(block.text.split()) <= 5:
             continue
 
-        classification = classify_block(block, llm_client, GROQ_MODEL)
+        classification = classify_block(block, llm_client)
         if classification and classification.confidence >= MIN_CONFIDENCE:
             classified_blocks.append((block, classification))
 
         if (i + 1) % 50 == 0:
             print(f"    Classified {i+1}/{len(blocks)} blocks ({len(classified_blocks)} matched)")
 
-        # Rate limiting for Groq
-        if (i + 1) % 28 == 0:
+        # Rate limiting (only needed for cloud APIs like Groq)
+        if not is_local_llm and (i + 1) % 28 == 0:
             time.sleep(3)
 
     print(f"  Classified {len(classified_blocks)} blocks to entities")
@@ -392,7 +393,7 @@ def ingest_document(file_path: Path, llm_client: Groq, min_blocks: int = 2):
         try:
             result, page_id = store_entity_page(
                 entity_name, entity_type, items, file_path,
-                ingestion_run_id, llm_client, GROQ_MODEL
+                ingestion_run_id, llm_client, is_local_llm
             )
             slug = slugify(entity_name)
             if page_id:
@@ -456,9 +457,6 @@ def main():
     if not DATABASE_URL:
         print("ERROR: DATABASE_URL environment variable is not set")
         sys.exit(1)
-    if not GROQ_API_KEY:
-        print("ERROR: GROQ_API_KEY environment variable is not set")
-        sys.exit(1)
 
     # Verify DB connectivity before starting
     try:
@@ -469,8 +467,14 @@ def main():
         print(f"ERROR: Cannot connect to database: {e}")
         sys.exit(1)
 
-    llm_client = Groq(api_key=GROQ_API_KEY)
-    print(f"Using model: {GROQ_MODEL}")
+    # Create LLM client (reads LLM_PROVIDER from config)
+    try:
+        llm_client = create_llm_client()
+    except Exception as e:
+        print(f"ERROR: Failed to initialize LLM client: {e}")
+        sys.exit(1)
+
+    is_local = LLM_PROVIDER.lower() == "ollama"
     print(f"Minimum blocks per entity: {args.min_blocks}")
 
     if args.file:
@@ -478,7 +482,7 @@ def main():
         if not file_path.exists():
             print(f"ERROR: File not found: {file_path}")
             sys.exit(1)
-        ingest_document(file_path, llm_client, args.min_blocks)
+        ingest_document(file_path, llm_client, args.min_blocks, is_local)
     else:
         docx_dir = Path(DOCX_DIR)
         if not docx_dir.exists():
@@ -496,7 +500,7 @@ def main():
 
         for file_path in docx_files:
             try:
-                ingest_document(file_path, llm_client, args.min_blocks)
+                ingest_document(file_path, llm_client, args.min_blocks, is_local)
             except Exception as e:
                 print(f"\n  ERROR ingesting {file_path.name}: {e}")
                 import traceback

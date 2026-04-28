@@ -3,18 +3,18 @@ Synthesizes wiki page content from source blocks using the LLM.
 The LLM writes coherent wiki prose, but every claim MUST have a citation
 pointing back to the exact source text from the .docx files.
 
+Supports both Groq (cloud) and Ollama (local) via LLMClient.
+
 Citations use markdown footnote format:
   Some claim about the entity. [^1]
 
   ## References
   [^1]: **Document.docx**, §Heading > Subheading — "exact source quote..."
 """
-import json
 import time
 from typing import Optional
 
-from groq import Groq
-from config import GROQ_API_KEY, GROQ_MODEL
+from llm_client import LLMClient
 
 
 SYNTHESIS_PROMPT = """You are writing a wiki article about "{entity_name}" (type: {entity_type}) for a fictional world encyclopedia.
@@ -72,8 +72,7 @@ def synthesize_wiki_page(
     entity_name: str,
     entity_type: str,
     items: list,
-    client: Optional[Groq] = None,
-    model: str = GROQ_MODEL,
+    client: LLMClient,
     max_retries: int = 3,
 ) -> str:
     """
@@ -81,9 +80,6 @@ def synthesize_wiki_page(
     Returns markdown with footnote citations.
     Falls back to structured verbatim layout if LLM fails.
     """
-    if client is None:
-        client = Groq(api_key=GROQ_API_KEY)
-
     source_text = format_source_blocks(items)
 
     # Choose prompt based on size
@@ -103,13 +99,12 @@ def synthesize_wiki_page(
 
     for attempt in range(max_retries):
         try:
-            response = client.chat.completions.create(
-                model=model,
+            content = client.chat(
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
                 max_tokens=4000,
+                json_mode=False,
             )
-            content = response.choices[0].message.content
             if content and len(content.strip()) > 50:
                 return content.strip()
 

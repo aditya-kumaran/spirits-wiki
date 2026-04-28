@@ -1,15 +1,14 @@
 """
 Uses LLM as a classifier ONLY. Never generates wiki content.
 Returns structured classification labels for each ContentBlock.
+Supports both Groq (cloud) and Ollama (local) via LLMClient.
 """
 import json
 import time
 from dataclasses import dataclass
 from typing import Optional
 
-from groq import Groq
-
-from config import GROQ_API_KEY, GROQ_MODEL
+from llm_client import LLMClient
 
 
 @dataclass
@@ -46,17 +45,13 @@ Respond with ONLY valid JSON. No other text. Example format:
 
 def classify_block(
     block,
-    client: Optional[Groq] = None,
-    model: str = GROQ_MODEL,
+    client: LLMClient,
     max_retries: int = 3,
 ) -> Optional[EntityClassification]:
     """
     Classify a content block using the LLM.
     The LLM returns ONLY classification labels -- never content.
     """
-    if client is None:
-        client = Groq(api_key=GROQ_API_KEY)
-
     heading_str = " > ".join(block.heading_path) if block.heading_path else "(no heading context)"
     prompt = CLASSIFICATION_PROMPT.format(
         text=block.text[:2000],  # Truncate very long blocks
@@ -65,15 +60,19 @@ def classify_block(
 
     for attempt in range(max_retries):
         try:
-            response = client.chat.completions.create(
-                model=model,
+            content = client.chat(
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.0,
                 max_tokens=300,
-                response_format={"type": "json_object"},
+                json_mode=True,
             )
 
-            content = response.choices[0].message.content
+            if not content:
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+                    continue
+                return None
+
             result = json.loads(content)
 
             return EntityClassification(
@@ -101,24 +100,3 @@ def classify_block(
             return None
 
     return None
-
-
-def classify_blocks_batch(blocks, client=None, model=GROQ_MODEL):
-    """Classify a list of blocks, yielding (block, classification) pairs."""
-    if client is None:
-        client = Groq(api_key=GROQ_API_KEY)
-
-    for i, block in enumerate(blocks):
-        # Skip very short blocks and headings that are just titles
-        if len(block.text.strip()) < 20:
-            continue
-        if block.block_type == "heading" and len(block.text.split()) <= 5:
-            continue
-
-        classification = classify_block(block, client, model)
-        if classification and classification.confidence >= 0.4:
-            yield block, classification
-
-        # Rate limiting: Groq free tier has limits
-        if i > 0 and i % 25 == 0:
-            time.sleep(2)
