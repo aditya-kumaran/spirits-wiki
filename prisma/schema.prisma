@@ -14,6 +14,7 @@ model Page {
   entityType      String    @default("other") @map("entity_type")
   contentMarkdown String    @default("") @map("content_markdown")
   sourceBlocks    Json      @default("[]") @map("source_blocks")
+  metadata        Json      @default("{}") @map("metadata")
   versionNumber   Int       @default(1) @map("version_number")
   origin          String    @default("ai-extracted")
   createdAt       DateTime  @default(now()) @map("created_at")

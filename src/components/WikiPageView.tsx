@@ -279,12 +279,24 @@ function EntityTypeEditor({
   );
 }
 
+function InfoboxRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="wiki-infobox-row">
+      <div className="wiki-infobox-label">{label}</div>
+      <div className="wiki-infobox-value">{value}</div>
+    </div>
+  );
+}
+
 export function WikiPageView({ page: initialPage }: { page: WikiPage }) {
   const [page, setPage] = useState(initialPage);
   const [validSlugs, setValidSlugs] = useState<Record<string, string>>({});
 
   const primaryImage = page.images?.find((img) => img.isPrimary);
   const allImages = page.images || [];
+  const meta = (page.metadata && typeof page.metadata === "object" && Object.keys(page.metadata).length > 0)
+    ? page.metadata as import("@/types").CharacterMetadata
+    : null;
 
   // Fetch all valid page slugs for wiki link validation
   useEffect(() => {
@@ -396,6 +408,50 @@ export function WikiPageView({ page: initialPage }: { page: WikiPage }) {
           <div className="wiki-infobox-label">Type</div>
           <div className="wiki-infobox-value capitalize">{page.entityType}</div>
         </div>
+
+        {/* Character-specific metadata fields */}
+        {page.entityType === "character" && meta && (
+          <>
+            {meta.spirit && (
+              <InfoboxRow label="Spirit" value={meta.spirit} />
+            )}
+            {meta.aura && (
+              <InfoboxRow label="Aura" value={meta.aura} />
+            )}
+            {meta.age && (
+              <InfoboxRow label="Age" value={meta.age} />
+            )}
+            {meta.appearance && (
+              <>
+                {meta.appearance.eyes && (
+                  <InfoboxRow label="Eyes" value={meta.appearance.eyes} />
+                )}
+                {meta.appearance.hair && (
+                  <InfoboxRow label="Hair" value={meta.appearance.hair} />
+                )}
+                {meta.appearance.build && (
+                  <InfoboxRow label="Build" value={meta.appearance.build} />
+                )}
+                {meta.appearance.style && (
+                  <InfoboxRow label="Style" value={meta.appearance.style} />
+                )}
+              </>
+            )}
+            {meta.powerSet && (
+              <InfoboxRow label="Power Set" value={meta.powerSet} />
+            )}
+            {meta.homeSystem && (
+              <InfoboxRow label="Home System" value={meta.homeSystem} />
+            )}
+            {meta.language && (
+              <InfoboxRow label="Language" value={meta.language} />
+            )}
+            {meta.inspiration && (
+              <InfoboxRow label="Inspiration" value={meta.inspiration} />
+            )}
+          </>
+        )}
+
         <div className="wiki-infobox-row">
           <div className="wiki-infobox-label">Origin</div>
           <div className="wiki-infobox-value">{page.origin}</div>

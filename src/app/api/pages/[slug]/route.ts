@@ -42,7 +42,7 @@ export async function PUT(
 
   try {
     const body = await request.json();
-    const { content_markdown, change_summary } = body;
+    const { content_markdown, change_summary, metadata: inputMetadata } = body;
 
     if (!content_markdown || typeof content_markdown !== "string") {
       return NextResponse.json(
@@ -72,6 +72,11 @@ export async function PUT(
         },
       });
 
+      // Merge metadata if provided
+      const updatedMetadata = inputMetadata
+        ? { ...(currentPage.metadata as Record<string, unknown> || {}), ...inputMetadata }
+        : undefined;
+
       // Update the page — immediate, synchronous, durable
       const updatedPage = await tx.page.update({
         where: { slug },
@@ -80,6 +85,7 @@ export async function PUT(
           versionNumber: newVersionNumber,
           origin: "manual-edit",
           lastModified: new Date(),
+          ...(updatedMetadata ? { metadata: updatedMetadata } : {}),
         },
       });
 

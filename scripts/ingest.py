@@ -193,8 +193,9 @@ def store_entity_page(entity_name, entity_type, items, file_path, ingestion_run_
 
     # Synthesize wiki content with citations from ALL blocks
     print(f"    Synthesizing: {entity_name} ({len(all_items)} total blocks)...")
-    content_md = synthesize_wiki_page(entity_name, entity_type, all_items, llm_client)
+    content_md, metadata = synthesize_wiki_page(entity_name, entity_type, all_items, llm_client)
     source_blocks_json = assemble_source_blocks_json(all_items)
+    metadata_json = json.dumps(metadata) if metadata else "{}"
 
     # Rate limit between synthesis calls (only needed for cloud APIs)
     if not is_local_llm:
@@ -236,18 +237,18 @@ def store_entity_page(entity_name, entity_type, items, file_path, ingestion_run_
 
                 cursor.execute("""
                     UPDATE pages SET content_markdown = %s, source_blocks = %s::jsonb,
-                        version_number = %s, last_modified = NOW()
+                        metadata = %s::jsonb, version_number = %s, last_modified = NOW()
                     WHERE id = %s
-                """, (content_md, source_blocks_json, new_version, page_id))
+                """, (content_md, source_blocks_json, metadata_json, new_version, page_id))
                 result = "updated"
         else:
             # Create new page
             page_id = str(uuid.uuid4())
             cursor.execute("""
                 INSERT INTO pages (id, slug, entity_name, entity_type, content_markdown,
-                    source_blocks, version_number, origin)
-                VALUES (%s, %s, %s, %s, %s, %s::jsonb, 1, 'ai-extracted')
-            """, (page_id, slug, entity_name, entity_type, content_md, source_blocks_json))
+                    source_blocks, metadata, version_number, origin)
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, 1, 'ai-extracted')
+            """, (page_id, slug, entity_name, entity_type, content_md, source_blocks_json, metadata_json))
 
             cursor.execute("""
                 INSERT INTO versions (id, page_id, version_number, content_markdown,

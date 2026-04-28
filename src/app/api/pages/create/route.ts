@@ -17,21 +17,33 @@ const ENTITY_TEMPLATES: Record<string, string> = {
 
 A brief description of this character.
 
-## History
-
-Key events in this character's life.
-
 ## Relationships
 
-Notable relationships with other characters.
+Notable relationships with other characters. Include personality traits in the relevant era subsection.
+
+### Part One
+
+Relationships and personality traits during Part One.
+
+### Part Two
+
+Relationships and personality traits during Part Two.
 
 ## Abilities
 
 Powers, skills, or notable abilities.
 
-## Appearances
+## Plot
 
-Where this character appears in the story.
+Organize plot points by era. Use ### subheadings for each era/age/part.
+
+### Part One
+
+Events during Part One.
+
+### Part Two
+
+Events during Part Two.
 `,
   location: `## Overview
 
@@ -43,7 +55,15 @@ Physical features and layout.
 
 ## History
 
-Key events that took place here.
+Organize history by era. Use ### subheadings for each era/age/part.
+
+### Part One
+
+Events during Part One.
+
+### Part Two
+
+Events during Part Two.
 
 ## Culture
 
@@ -174,7 +194,7 @@ Additional information.
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { entityName, entityType } = body;
+    const { entityName, entityType, metadata: inputMetadata } = body;
 
     if (!entityName || typeof entityName !== "string") {
       return NextResponse.json(
@@ -204,6 +224,14 @@ export async function POST(request: NextRequest) {
     const template = ENTITY_TEMPLATES[type] || ENTITY_TEMPLATES.other;
 
     const page = await prisma.$transaction(async (tx) => {
+      const defaultMeta = type === "character" ? {
+        spirit: "", aura: "", appearance: { eyes: "", hair: "", build: "", style: "" },
+        inspiration: "", age: "", powerSet: "", homeSystem: "", language: "",
+      } : {};
+      const pageMeta = inputMetadata && typeof inputMetadata === "object"
+        ? { ...defaultMeta, ...inputMetadata }
+        : defaultMeta;
+
       const newPage = await tx.page.create({
         data: {
           slug,
@@ -211,6 +239,7 @@ export async function POST(request: NextRequest) {
           entityType: type,
           contentMarkdown: template,
           sourceBlocks: [],
+          metadata: pageMeta,
           versionNumber: 1,
           origin: "manual-create",
         },

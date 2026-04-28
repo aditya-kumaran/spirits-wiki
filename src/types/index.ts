@@ -1,3 +1,21 @@
+export interface CharacterMetadata {
+  spirit?: string;
+  aura?: string;
+  appearance?: {
+    eyes?: string;
+    hair?: string;
+    build?: string;
+    style?: string;
+  };
+  inspiration?: string;
+  age?: string;
+  powerSet?: string;
+  homeSystem?: string;
+  language?: string;
+}
+
+export type PageMetadata = CharacterMetadata & Record<string, unknown>;
+
 export interface WikiPage {
   id: string;
   slug: string;
@@ -5,6 +23,7 @@ export interface WikiPage {
   entityType: string;
   contentMarkdown: string;
   sourceBlocks: SourceBlock[];
+  metadata?: PageMetadata;
   versionNumber: number;
   origin: string;
   createdAt: string;
