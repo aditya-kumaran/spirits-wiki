@@ -6,9 +6,14 @@ Usage:
     python scripts/ingest.py                          # Ingest all files in wikiInitializationDocuments/
     python scripts/ingest.py --file path/to/doc.docx  # Ingest a specific file
     python scripts/ingest.py --min-blocks 3           # Require 3+ blocks per entity (default: 2)
+    python scripts/ingest.py --no-checkpoint          # Ignore checkpoint and start fresh
 
 Content is synthesized by the LLM from source material, with mandatory
 footnote citations linking every claim back to the exact source text.
+
+Classification progress is checkpointed to disk so interrupted runs can resume.
+Checkpoints are versioned — any change to the ingestion or classification scripts
+automatically invalidates old checkpoints.
 """
 import argparse
 import hashlib
@@ -32,6 +37,147 @@ from parse_docx import parse_docx, ContentBlock, ExtractedImage
 from classify_entities import classify_block, EntityClassification
 from synthesize_content import synthesize_wiki_page
 from llm_client import create_llm_client, LLMClient
+
+# Directory for checkpoint files
+CHECKPOINT_DIR = os.path.join(os.path.dirname(__file__), ".checkpoints")
+
+
+def compute_script_version() -> str:
+    """
+    Compute a hash of all key script files. Any change to these files
+    invalidates existing checkpoints, forcing a fresh classification.
+    """
+    scripts_dir = os.path.dirname(__file__)
+    version_files = [
+        "ingest.py", "classify_entities.py", "synthesize_content.py",
+        "parse_docx.py", "llm_client.py", "config.py",
+    ]
+    h = hashlib.sha256()
+    for fname in sorted(version_files):
+        fpath = os.path.join(scripts_dir, fname)
+        if os.path.exists(fpath):
+            h.update(open(fpath, "rb").read())
+    return h.hexdigest()[:16]
+
+
+def get_checkpoint_path(file_path: Path) -> str:
+    """Get the checkpoint file path for a given document."""
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    safe_name = file_path.name.replace(" ", "_").replace(".", "_")
+    return os.path.join(CHECKPOINT_DIR, f"classify_{safe_name}.json")
+
+
+def load_checkpoint(file_path: Path, file_hash: str) -> tuple[list, int]:
+    """
+    Load classification checkpoint if valid.
+    Returns (classified_blocks_data, last_processed_index).
+    Returns ([], -1) if no valid checkpoint exists.
+    """
+    cp_path = get_checkpoint_path(file_path)
+    if not os.path.exists(cp_path):
+        return [], -1
+
+    try:
+        with open(cp_path, "r") as f:
+            data = json.load(f)
+
+        # Validate checkpoint matches current script version and file
+        if data.get("script_version") != compute_script_version():
+            print("  Checkpoint found but script version changed — starting fresh")
+            os.remove(cp_path)
+            return [], -1
+
+        if data.get("file_hash") != file_hash:
+            print("  Checkpoint found but file content changed — starting fresh")
+            os.remove(cp_path)
+            return [], -1
+
+        last_idx = data.get("last_processed_index", -1)
+        blocks_data = data.get("classified_blocks", [])
+        print(f"  Resuming from checkpoint: {last_idx + 1} blocks already classified ({len(blocks_data)} matched)")
+        return blocks_data, last_idx
+
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        print(f"  Checkpoint corrupted ({e}) — starting fresh")
+        if os.path.exists(cp_path):
+            os.remove(cp_path)
+        return [], -1
+
+
+def save_checkpoint(file_path: Path, file_hash: str, classified_data: list, last_index: int):
+    """Save classification progress to a checkpoint file."""
+    cp_path = get_checkpoint_path(file_path)
+    data = {
+        "script_version": compute_script_version(),
+        "file_hash": file_hash,
+        "file_name": file_path.name,
+        "last_processed_index": last_index,
+        "classified_blocks": classified_data,
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+    }
+    # Write atomically (write to temp, then rename)
+    tmp_path = cp_path + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(data, f)
+    os.replace(tmp_path, cp_path)
+
+
+def delete_checkpoint(file_path: Path):
+    """Remove checkpoint after successful ingestion."""
+    cp_path = get_checkpoint_path(file_path)
+    if os.path.exists(cp_path):
+        os.remove(cp_path)
+
+
+def serialize_classification(block: ContentBlock, classification: EntityClassification) -> dict:
+    """Serialize a (block, classification) pair for checkpoint storage."""
+    return {
+        "block": {
+            "doc_filename": block.doc_filename,
+            "heading_path": block.heading_path,
+            "paragraph_index": block.paragraph_index,
+            "text": block.text,
+            "style": getattr(block, "style", ""),
+            "block_type": block.block_type,
+            "content_hash": block.content_hash,
+            "parent_context": getattr(block, "parent_context", ""),
+            "indent_level": getattr(block, "indent_level", 0),
+        },
+        "classification": {
+            "primary_entity": classification.primary_entity,
+            "entity_type": classification.entity_type,
+            "section_type": classification.section_type,
+            "mentioned_entities": classification.mentioned_entities,
+            "confidence": classification.confidence,
+            "relevant_entities": classification.relevant_entities,
+        },
+    }
+
+
+def deserialize_classification(data: dict) -> tuple:
+    """Reconstruct (ContentBlock, EntityClassification) from checkpoint data."""
+    b = data["block"]
+    c = data["classification"]
+    block = ContentBlock(
+        doc_filename=b["doc_filename"],
+        heading_path=b["heading_path"],
+        paragraph_index=b["paragraph_index"],
+        text=b["text"],
+        style=b.get("style", ""),
+        block_type=b["block_type"],
+    )
+    # Restore optional attributes
+    block.parent_context = b.get("parent_context", "")
+    block.indent_level = b.get("indent_level", 0)
+    classification = EntityClassification(
+        primary_entity=c["primary_entity"],
+        entity_type=c["entity_type"],
+        section_type=c["section_type"],
+        mentioned_entities=c["mentioned_entities"],
+        confidence=c["confidence"],
+        relevant_entities=c["relevant_entities"],
+    )
+    return block, classification
 
 
 def get_db_connection():
@@ -346,7 +492,7 @@ def generate_cross_links(entity_blocks: dict, page_ids: dict):
         conn.close()
 
 
-def ingest_document(file_path: Path, llm_client: LLMClient, min_blocks: int = 2, is_local_llm: bool = False):
+def ingest_document(file_path: Path, llm_client: LLMClient, min_blocks: int = 2, is_local_llm: bool = False, use_checkpoint: bool = True):
     """Ingest a single .docx file into the database."""
     ingestion_run_id = str(uuid.uuid4())
     file_hash = hashlib.sha256(file_path.read_bytes()).hexdigest()
@@ -354,6 +500,7 @@ def ingest_document(file_path: Path, llm_client: LLMClient, min_blocks: int = 2,
     print(f"\n{'='*60}")
     print(f"Ingesting: {file_path.name}")
     print(f"File hash: {file_hash[:16]}...")
+    print(f"Script version: {compute_script_version()}")
     print(f"Run ID: {ingestion_run_id[:8]}...")
     print(f"Min blocks per entity: {min_blocks}")
 
@@ -375,24 +522,55 @@ def ingest_document(file_path: Path, llm_client: LLMClient, min_blocks: int = 2,
     print(f"  Extracted {len(blocks)} text blocks and {len(images)} images")
 
     # Step 2: Classify blocks (no DB needed — only LLM calls)
-    print(f"  Classifying entities (this may take a while)...")
+    # Try loading checkpoint for resume support
+    checkpoint_data = []
+    resume_from = -1
+    if use_checkpoint:
+        checkpoint_data, resume_from = load_checkpoint(file_path, file_hash)
+
+    # Reconstruct already-classified blocks from checkpoint
     classified_blocks = []
-    for i, block in enumerate(blocks):
-        if len(block.text.strip()) < MIN_TEXT_LENGTH:
-            continue
-        if block.block_type == "heading" and len(block.text.split()) <= 5:
-            continue
+    if checkpoint_data:
+        for cd in checkpoint_data:
+            try:
+                classified_blocks.append(deserialize_classification(cd))
+            except (KeyError, TypeError) as e:
+                print(f"  Warning: skipping corrupted checkpoint entry: {e}")
 
-        classification = classify_block(block, llm_client)
-        if classification and classification.confidence >= MIN_CONFIDENCE:
-            classified_blocks.append((block, classification))
+    if resume_from >= 0 and resume_from >= len(blocks) - 1:
+        print(f"  Classification already complete from checkpoint ({len(classified_blocks)} matched)")
+    else:
+        start_from = resume_from + 1 if resume_from >= 0 else 0
+        if start_from > 0:
+            print(f"  Resuming classification from block {start_from}...")
+        else:
+            print(f"  Classifying entities (this may take a while)...")
 
-        if (i + 1) % 50 == 0:
-            print(f"    Classified {i+1}/{len(blocks)} blocks ({len(classified_blocks)} matched)")
+        for i in range(start_from, len(blocks)):
+            block = blocks[i]
+            if len(block.text.strip()) < MIN_TEXT_LENGTH:
+                pass  # Skip but still count as processed for checkpoint
+            elif block.block_type == "heading" and len(block.text.split()) <= 5:
+                pass  # Skip headings with <= 5 words
+            else:
+                classification = classify_block(block, llm_client)
+                if classification and classification.confidence >= MIN_CONFIDENCE:
+                    classified_blocks.append((block, classification))
+                    checkpoint_data.append(serialize_classification(block, classification))
 
-        # Rate limiting (only needed for cloud APIs like Groq)
-        if not is_local_llm and (i + 1) % 28 == 0:
-            time.sleep(3)
+            if (i + 1) % 50 == 0:
+                print(f"    Classified {i+1}/{len(blocks)} blocks ({len(classified_blocks)} matched)")
+                # Save checkpoint every 50 blocks
+                if use_checkpoint:
+                    save_checkpoint(file_path, file_hash, checkpoint_data, i)
+
+            # Rate limiting (only needed for cloud APIs like Groq)
+            if not is_local_llm and (i + 1 - start_from) > 0 and (i + 1 - start_from) % 28 == 0:
+                time.sleep(3)
+
+        # Final checkpoint save
+        if use_checkpoint:
+            save_checkpoint(file_path, file_hash, checkpoint_data, len(blocks) - 1)
 
     print(f"  Classified {len(classified_blocks)} blocks to entities")
 
@@ -503,6 +681,11 @@ def ingest_document(file_path: Path, llm_client: LLMClient, min_blocks: int = 2,
 
     links_created = generate_cross_links(filtered_entities, page_ids)
 
+    # Clean up checkpoint after successful ingestion
+    if use_checkpoint:
+        delete_checkpoint(file_path)
+        print(f"  Checkpoint cleaned up (ingestion complete)")
+
     print(f"\n  Results:")
     print(f"    Pages created:    {pages_created}")
     print(f"    Pages updated:    {pages_updated}")
@@ -527,7 +710,10 @@ def main():
     parser.add_argument("--file", type=str, help="Path to a specific .docx file to ingest")
     parser.add_argument("--min-blocks", type=int, default=2,
                         help="Minimum number of source blocks for an entity to get a page (default: 2)")
+    parser.add_argument("--no-checkpoint", action="store_true",
+                        help="Ignore any existing checkpoint and start classification from scratch")
     args = parser.parse_args()
+    use_checkpoint = not args.no_checkpoint
 
     if not DATABASE_URL:
         print("ERROR: DATABASE_URL environment variable is not set")
@@ -557,7 +743,7 @@ def main():
         if not file_path.exists():
             print(f"ERROR: File not found: {file_path}")
             sys.exit(1)
-        ingest_document(file_path, llm_client, args.min_blocks, is_local)
+        ingest_document(file_path, llm_client, args.min_blocks, is_local, use_checkpoint)
     else:
         docx_dir = Path(DOCX_DIR)
         if not docx_dir.exists():
@@ -575,7 +761,7 @@ def main():
 
         for file_path in docx_files:
             try:
-                ingest_document(file_path, llm_client, args.min_blocks, is_local)
+                ingest_document(file_path, llm_client, args.min_blocks, is_local, use_checkpoint)
             except Exception as e:
                 print(f"\n  ERROR ingesting {file_path.name}: {e}")
                 import traceback
