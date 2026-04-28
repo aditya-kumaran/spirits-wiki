@@ -1,18 +1,20 @@
 """
 Main ingestion script.
-Parses .docx files, classifies entities, and stores verbatim content in the database.
+Parses .docx files, classifies entities, and stores synthesized content in the database.
 
 Usage:
     python scripts/ingest.py                          # Ingest all files in wikiInitializationDocuments/
     python scripts/ingest.py --file path/to/doc.docx  # Ingest a specific file
+    python scripts/ingest.py --min-blocks 3           # Require 3+ blocks per entity (default: 2)
 
-All wiki page content is extracted VERBATIM from .docx files.
-The LLM is used ONLY as a classifier (entity name, type, section routing).
+Content is synthesized by the LLM from source material, with mandatory
+footnote citations linking every claim back to the exact source text.
 """
 import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -29,6 +31,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from config import DATABASE_URL, GROQ_API_KEY, GROQ_MODEL, DOCX_DIR, MIN_CONFIDENCE, MIN_TEXT_LENGTH
 from parse_docx import parse_docx, ContentBlock, ExtractedImage
 from classify_entities import classify_block, EntityClassification
+from synthesize_content import synthesize_wiki_page
 
 
 def get_db_connection():
@@ -47,46 +50,44 @@ def slugify(name: str) -> str:
     return slug.strip("-")[:100]
 
 
-def assemble_markdown(items: list) -> str:
+def is_proper_noun_entity(name: str) -> bool:
     """
-    Assemble wiki page markdown from classified blocks.
-    ALL TEXT IS VERBATIM from the .docx -- no LLM-generated prose.
+    Filter out generic/non-entity terms.
+    Returns True only for names that look like proper nouns.
     """
-    sections: dict = {}
-    for block, classification in items:
-        section = classification.section_type
-        if section not in sections:
-            sections[section] = []
-        sections[section].append((block, classification))
+    if not name or len(name) < 2:
+        return False
 
-    all_sections = [
-        "overview", "attributes", "relationships", "history",
-        "appearances", "abilities", "culture", "geography",
-        "timeline", "other"
-    ]
+    # Reject single common words
+    common_words = {
+        "unknown", "n/a", "none", "other", "general", "various",
+        "introduction", "overview", "summary", "conclusion", "chapter",
+        "section", "note", "notes", "description", "the", "this",
+        "that", "these", "those", "here", "there", "world", "story",
+        "character", "location", "event", "history", "philosophy",
+        "culture", "religion", "magic", "power", "system", "land",
+        "people", "group", "place", "time", "era", "age", "type",
+        "example", "list", "table", "figure", "appendix", "reference",
+        "document", "page", "text", "content", "heading", "paragraph",
+    }
+    if name.lower().strip() in common_words:
+        return False
 
-    lines = []
-    for section_name in all_sections:
-        display_name = section_name.replace("_", " ").title()
-        lines.append(f"## {display_name}")
-        lines.append("")
+    # Reject names that are all lowercase (likely generic terms)
+    # But allow names with mixed case or all caps
+    words = name.split()
+    if len(words) == 1 and name[0].islower():
+        return False
 
-        if section_name in sections:
-            for block, classification in sections[section_name]:
-                lines.append(block.text)
-                lines.append("")
-                heading_str = " > ".join(block.heading_path) if block.heading_path else "N/A"
-                lines.append(f"*[Source: {block.doc_filename}, \u00a7{heading_str}]*")
-                lines.append("")
-        else:
-            lines.append("*Not documented in source materials*")
-            lines.append("")
+    # Reject very long "names" that are actually sentences
+    if len(words) > 6:
+        return False
 
-    return "\n".join(lines)
+    return True
 
 
 def assemble_source_blocks_json(items: list) -> str:
-    """Build the source_blocks JSON array."""
+    """Build the source_blocks JSON array for storage."""
     blocks = []
     for block, classification in items:
         blocks.append({
@@ -100,17 +101,28 @@ def assemble_source_blocks_json(items: list) -> str:
     return json.dumps(blocks)
 
 
-def store_entity_page(entity_name, entity_type, items, file_path, ingestion_run_id):
+def extract_wiki_links(content_md: str) -> list:
+    """Extract [[Entity Name]] links from markdown content."""
+    return re.findall(r'\[\[([^\]]+)\]\]', content_md)
+
+
+def store_entity_page(entity_name, entity_type, items, file_path, ingestion_run_id, llm_client, model):
     """
-    Store a single entity's page and source chunks in the database.
-    Opens a fresh connection, commits, and closes — resilient to stale connections.
+    Store a single entity's page in the database.
+    Synthesizes content using LLM with citations.
+    Opens a fresh connection per entity for resilience.
     """
     slug = slugify(entity_name)
     if not slug:
-        return "skipped"
+        return "skipped", None
 
-    content_md = assemble_markdown(items)
+    # Synthesize wiki content with citations
+    print(f"    Synthesizing: {entity_name} ({len(items)} blocks)...")
+    content_md = synthesize_wiki_page(entity_name, entity_type, items, llm_client, model)
     source_blocks_json = assemble_source_blocks_json(items)
+
+    # Rate limit between synthesis calls
+    time.sleep(2)
 
     conn = get_db_connection()
     try:
@@ -148,26 +160,21 @@ def store_entity_page(entity_name, entity_type, items, file_path, ingestion_run_
                 )
                 result = "conflict"
             else:
-                # Append new content
+                # Update with new synthesized content
                 new_version = current_version + 1
-                cursor.execute("SELECT content_markdown FROM pages WHERE id = %s", (page_id,))
-                current_md = cursor.fetchone()[0]
-
-                merged_md = current_md + "\n\n---\n\n" + content_md
-
                 cursor.execute("""
                     INSERT INTO versions (id, page_id, version_number, content_markdown,
                         source_blocks, origin, change_summary)
                     VALUES (%s, %s, %s, %s, %s::jsonb, 'ai-extracted',
                         %s)
-                """, (str(uuid.uuid4()), page_id, new_version, merged_md,
+                """, (str(uuid.uuid4()), page_id, new_version, content_md,
                       source_blocks_json, f"Re-ingestion from {file_path.name}"))
 
                 cursor.execute("""
                     UPDATE pages SET content_markdown = %s, source_blocks = %s::jsonb,
                         version_number = %s, last_modified = NOW()
                     WHERE id = %s
-                """, (merged_md, source_blocks_json, new_version, page_id))
+                """, (content_md, source_blocks_json, new_version, page_id))
                 result = "updated"
         else:
             # Create new page
@@ -207,12 +214,11 @@ def store_entity_page(entity_name, entity_type, items, file_path, ingestion_run_
             except Exception as e:
                 print(f"    Warning: Failed to store chunk: {e}")
                 conn.rollback()
-                # Reconnect and skip this chunk
                 conn = get_db_connection()
                 cursor = conn.cursor()
 
         conn.commit()
-        return result
+        return result, page_id
 
     except Exception as e:
         conn.rollback()
@@ -221,7 +227,61 @@ def store_entity_page(entity_name, entity_type, items, file_path, ingestion_run_
         conn.close()
 
 
-def ingest_document(file_path: Path, llm_client: Groq):
+def generate_cross_links(entity_blocks: dict, page_ids: dict):
+    """
+    Generate cross-links between entity pages based on:
+    1. mentioned_entities from classification
+    2. [[wiki links]] in synthesized content
+    """
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        links_created = 0
+
+        # Build a lookup: entity name -> slug
+        name_to_slug = {}
+        for entity_name in entity_blocks:
+            slug = slugify(entity_name)
+            if slug:
+                name_to_slug[entity_name.lower()] = slug
+
+        for entity_name, items in entity_blocks.items():
+            source_slug = slugify(entity_name)
+            if not source_slug or source_slug not in page_ids:
+                continue
+
+            source_page_id = page_ids[source_slug]
+            linked_targets = set()
+
+            # Collect mentioned entities from classification
+            for block, classification in items:
+                for mentioned in classification.mentioned_entities:
+                    mentioned_lower = mentioned.lower()
+                    if mentioned_lower in name_to_slug:
+                        target_slug = name_to_slug[mentioned_lower]
+                        if target_slug != source_slug and target_slug in page_ids:
+                            linked_targets.add(target_slug)
+
+            # Create cross-link records
+            for target_slug in linked_targets:
+                target_page_id = page_ids[target_slug]
+                try:
+                    cursor.execute("""
+                        INSERT INTO cross_links (id, source_page_id, target_page_id)
+                        VALUES (%s, %s, %s)
+                        ON CONFLICT (source_page_id, target_page_id) DO NOTHING
+                    """, (str(uuid.uuid4()), source_page_id, target_page_id))
+                    links_created += 1
+                except Exception:
+                    pass
+
+        conn.commit()
+        return links_created
+    finally:
+        conn.close()
+
+
+def ingest_document(file_path: Path, llm_client: Groq, min_blocks: int = 2):
     """Ingest a single .docx file into the database."""
     ingestion_run_id = str(uuid.uuid4())
     file_hash = hashlib.sha256(file_path.read_bytes()).hexdigest()
@@ -230,6 +290,7 @@ def ingest_document(file_path: Path, llm_client: Groq):
     print(f"Ingesting: {file_path.name}")
     print(f"File hash: {file_hash[:16]}...")
     print(f"Run ID: {ingestion_run_id[:8]}...")
+    print(f"Min blocks per entity: {min_blocks}")
 
     # Check if already ingested with same hash (fresh connection)
     conn = get_db_connection()
@@ -262,7 +323,7 @@ def ingest_document(file_path: Path, llm_client: Groq):
             classified_blocks.append((block, classification))
 
         if (i + 1) % 50 == 0:
-            print(f"    Classified {i+1}/{len(blocks)} blocks ({len(classified_blocks)} entities found)")
+            print(f"    Classified {i+1}/{len(blocks)} blocks ({len(classified_blocks)} matched)")
 
         # Rate limiting for Groq
         if (i + 1) % 28 == 0:
@@ -278,9 +339,29 @@ def ingest_document(file_path: Path, llm_client: Groq):
             entity_blocks[entity_name] = []
         entity_blocks[entity_name].append((block, classification))
 
-    print(f"  Found {len(entity_blocks)} distinct entities")
+    # Step 4: FILTER — only keep entities with enough blocks AND proper noun names
+    filtered_entities = {}
+    skipped_too_few = 0
+    skipped_not_proper = 0
 
-    # Step 4: Record the document (fresh connection)
+    for entity_name, items in entity_blocks.items():
+        if not entity_name or entity_name.lower() in ("unknown", "n/a", "none"):
+            continue
+
+        if not is_proper_noun_entity(entity_name):
+            skipped_not_proper += 1
+            continue
+
+        if len(items) < min_blocks:
+            skipped_too_few += 1
+            continue
+
+        filtered_entities[entity_name] = items
+
+    print(f"  Found {len(entity_blocks)} raw entities")
+    print(f"  Filtered to {len(filtered_entities)} entities (skipped {skipped_too_few} with <{min_blocks} blocks, {skipped_not_proper} non-proper-nouns)")
+
+    # Step 5: Record the document (fresh connection)
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
@@ -297,21 +378,26 @@ def ingest_document(file_path: Path, llm_client: Groq):
     finally:
         conn.close()
 
-    # Step 5: Store each entity page (fresh connection per entity)
+    # Step 6: Synthesize and store each entity page
     pages_created = 0
     pages_updated = 0
     conflicts_found = 0
     errors = 0
+    page_ids = {}  # slug -> page_id for cross-linking
 
-    total = len(entity_blocks)
-    for idx, (entity_name, items) in enumerate(entity_blocks.items()):
-        if not entity_name or entity_name.lower() in ("unknown", "n/a", "none"):
-            continue
-
+    total = len(filtered_entities)
+    for idx, (entity_name, items) in enumerate(filtered_entities.items()):
         entity_type = items[0][1].entity_type
 
         try:
-            result = store_entity_page(entity_name, entity_type, items, file_path, ingestion_run_id)
+            result, page_id = store_entity_page(
+                entity_name, entity_type, items, file_path,
+                ingestion_run_id, llm_client, GROQ_MODEL
+            )
+            slug = slugify(entity_name)
+            if page_id:
+                page_ids[slug] = page_id
+
             if result == "created":
                 pages_created += 1
             elif result == "updated":
@@ -323,13 +409,29 @@ def ingest_document(file_path: Path, llm_client: Groq):
             errors += 1
             print(f"    ERROR storing '{entity_name}': {e}")
 
-        if (idx + 1) % 50 == 0:
-            print(f"    Stored {idx+1}/{total} entities...")
+        if (idx + 1) % 10 == 0 or (idx + 1) == total:
+            print(f"    Progress: {idx+1}/{total} entities stored...")
+
+    # Step 7: Generate cross-links
+    print(f"  Generating cross-links...")
+    # Also need existing page IDs for cross-linking
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT slug, id FROM pages")
+        for row in cursor.fetchall():
+            if row[0] not in page_ids:
+                page_ids[row[0]] = row[1]
+    finally:
+        conn.close()
+
+    links_created = generate_cross_links(filtered_entities, page_ids)
 
     print(f"\n  Results:")
     print(f"    Pages created:    {pages_created}")
     print(f"    Pages updated:    {pages_updated}")
     print(f"    Conflicts found:  {conflicts_found}")
+    print(f"    Cross-links:      {links_created}")
     print(f"    Errors:           {errors}")
     print(f"    Images extracted: {len(images)}")
 
@@ -347,6 +449,8 @@ def ingest_document(file_path: Path, llm_client: Groq):
 def main():
     parser = argparse.ArgumentParser(description="Ingest .docx files into the wiki database")
     parser.add_argument("--file", type=str, help="Path to a specific .docx file to ingest")
+    parser.add_argument("--min-blocks", type=int, default=2,
+                        help="Minimum number of source blocks for an entity to get a page (default: 2)")
     args = parser.parse_args()
 
     if not DATABASE_URL:
@@ -366,13 +470,15 @@ def main():
         sys.exit(1)
 
     llm_client = Groq(api_key=GROQ_API_KEY)
+    print(f"Using model: {GROQ_MODEL}")
+    print(f"Minimum blocks per entity: {args.min_blocks}")
 
     if args.file:
         file_path = Path(args.file)
         if not file_path.exists():
             print(f"ERROR: File not found: {file_path}")
             sys.exit(1)
-        ingest_document(file_path, llm_client)
+        ingest_document(file_path, llm_client, args.min_blocks)
     else:
         docx_dir = Path(DOCX_DIR)
         if not docx_dir.exists():
@@ -390,7 +496,7 @@ def main():
 
         for file_path in docx_files:
             try:
-                ingest_document(file_path, llm_client)
+                ingest_document(file_path, llm_client, args.min_blocks)
             except Exception as e:
                 print(f"\n  ERROR ingesting {file_path.name}: {e}")
                 import traceback

@@ -43,3 +43,6 @@ venv/
 # data
 /data/
 /scripts/__pycache__/
+
+# uploaded images (local dev)
+/public/uploads/

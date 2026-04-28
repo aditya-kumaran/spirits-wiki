@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { put } from "@vercel/blob";
 import { prisma } from "@/lib/db";
+import { writeFile, mkdir } from "fs/promises";
+import path from "path";
 
 export async function POST(request: NextRequest) {
   try {
@@ -14,10 +15,26 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "No file provided" }, { status: 400 });
     }
 
-    // Upload to Vercel Blob
-    const blob = await put(`wiki-images/${Date.now()}-${file.name}`, file, {
-      access: "public",
-    });
+    let imageUrl: string;
+
+    // Try Vercel Blob first (production), fall back to local storage (dev)
+    if (process.env.BLOB_READ_WRITE_TOKEN) {
+      const { put } = await import("@vercel/blob");
+      const blob = await put(`wiki-images/${Date.now()}-${file.name}`, file, {
+        access: "public",
+      });
+      imageUrl = blob.url;
+    } else {
+      // Local file storage for development
+      const uploadsDir = path.join(process.cwd(), "public", "uploads");
+      await mkdir(uploadsDir, { recursive: true });
+
+      const filename = `${Date.now()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, "_")}`;
+      const filePath = path.join(uploadsDir, filename);
+      const bytes = await file.arrayBuffer();
+      await writeFile(filePath, Buffer.from(bytes));
+      imageUrl = `/uploads/${filename}`;
+    }
 
     // Find the page if slug provided
     let pageId: string | null = null;
@@ -43,7 +60,7 @@ export async function POST(request: NextRequest) {
         filename: file.name,
         altText: file.name.replace(/\.[^.]+$/, ""),
         caption: caption || null,
-        url: blob.url,
+        url: imageUrl,
         isPrimary,
         origin: "manual-upload",
       },
