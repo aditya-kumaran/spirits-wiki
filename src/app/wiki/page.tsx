@@ -53,7 +53,15 @@ function WikiIndexContent() {
     <div>
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-2xl font-bold">Wiki Pages</h1>
-        <span className="text-sm text-gray-500">{total} pages</span>
+        <div className="flex items-center gap-3">
+          <span className="text-sm text-gray-500">{total} pages</span>
+          <Link
+            href="/wiki/new"
+            className="px-3 py-1.5 bg-[var(--color-wiki-accent)] text-white rounded text-sm no-underline hover:bg-[var(--color-wiki-accent-hover)]"
+          >
+            + New Page
+          </Link>
+        </div>
       </div>
 
       {/* Search */}

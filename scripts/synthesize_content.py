@@ -17,7 +17,7 @@ from typing import Optional
 from llm_client import LLMClient
 
 
-SYNTHESIS_PROMPT = """You are writing a wiki article about "{entity_name}" (type: {entity_type}) for a fictional world encyclopedia.
+SYNTHESIS_PROMPT = """You are writing a wiki article about "{entity_name}" (type: {entity_type}).
 
 You MUST write coherent, well-organized wiki prose. However, every factual claim must be supported by a citation from the provided source material. Use markdown footnote syntax: [^1], [^2], etc.
 
@@ -25,9 +25,10 @@ RULES:
 1. Write in an encyclopedic, third-person style.
 2. Every factual statement MUST have at least one footnote citation [^N] referencing the source material below.
 3. Do NOT invent any facts not present in the sources. If something is unclear, say so.
-4. Organize the content with markdown ## headings. Use whichever sections are appropriate for the content (e.g., Overview, History, Relationships, Abilities, Culture, etc.). Skip sections that have no source material.
-5. Use [[Entity Name]] syntax to link to other wiki entities mentioned in the text (for cross-linking).
-6. At the end, include a ## References section listing every footnote with the source document, heading path, and a SHORT direct quote (the key phrase, not the full paragraph).
+4. Do NOT introduce the entity by saying they are "a character in" or "from" any fictional world. Just describe them directly — start with what they are or what they do.
+5. Organize the content with markdown ## headings. Use whichever sections are appropriate for the content (e.g., Overview, History, Relationships, Abilities, Culture, etc.). Skip sections that have no source material.
+6. Use [[Entity Name]] syntax to link to other wiki entities mentioned in the text (for cross-linking).
+7. At the end, include a ## References section listing every footnote with the source document, heading path, and a SHORT direct quote (the key phrase, not the full paragraph). Each reference MUST be on its own line in the format: [^N]: **Source.docx**, §Heading — "quote"
 
 SOURCE MATERIAL (each block has a reference ID):
 
@@ -36,7 +37,7 @@ SOURCE MATERIAL (each block has a reference ID):
 Write the wiki article now. Remember: every claim needs a citation, and the References section must list all citations with source details and quotes."""
 
 
-SYNTHESIS_PROMPT_LARGE = """You are writing a wiki article about "{entity_name}" (type: {entity_type}) for a fictional world encyclopedia.
+SYNTHESIS_PROMPT_LARGE = """You are writing a wiki article about "{entity_name}" (type: {entity_type}).
 
 You have {block_count} source blocks. Write a comprehensive wiki article synthesizing this information.
 
@@ -44,9 +45,10 @@ RULES:
 1. Write in an encyclopedic, third-person style.
 2. Every factual statement MUST have at least one footnote citation [^N].
 3. Do NOT invent any facts. Only use information from the sources.
-4. Use ## headings to organize (Overview, History, Relationships, etc.). Skip empty sections.
-5. Use [[Entity Name]] to link to other entities.
-6. End with ## References listing each footnote: source doc, heading, and a key quote.
+4. Do NOT introduce the entity by saying they are "a character in" or "from" any fictional world. Just describe them directly.
+5. Use ## headings to organize (Overview, History, Relationships, etc.). Skip empty sections.
+6. Use [[Entity Name]] to link to other entities.
+7. End with ## References listing each footnote on its own line: [^N]: **Source.docx**, §Heading — "quote"
 
 SOURCE MATERIAL:
 

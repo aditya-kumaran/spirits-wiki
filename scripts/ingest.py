@@ -124,15 +124,77 @@ def store_entity_page(entity_name, entity_type, items, file_path, ingestion_run_
     Store a single entity's page in the database.
     Synthesizes content using LLM with citations.
     Opens a fresh connection per entity for resilience.
+
+    When a page already exists (from a previous file), this MERGES the new
+    source blocks with the existing ones and re-synthesizes from all blocks
+    combined, so information from multiple files accumulates on one page.
     """
     slug = slugify(entity_name)
     if not slug:
         return "skipped", None
 
-    # Synthesize wiki content with citations
-    print(f"    Synthesizing: {entity_name} ({len(items)} blocks)...")
-    content_md = synthesize_wiki_page(entity_name, entity_type, items, llm_client)
-    source_blocks_json = assemble_source_blocks_json(items)
+    # First, check if the page exists and get existing source blocks for merging
+    conn = get_db_connection()
+    existing_page = None
+    existing_blocks_data = []
+    has_manual_edits = False
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, origin, version_number, source_blocks FROM pages WHERE slug = %s", (slug,))
+        row = cursor.fetchone()
+        if row:
+            existing_page = {"id": row[0], "origin": row[1], "version_number": row[2]}
+            existing_blocks_data = json.loads(row[3]) if row[3] else []
+
+            cursor.execute("""
+                SELECT EXISTS(
+                    SELECT 1 FROM versions
+                    WHERE page_id = %s AND origin IN ('manual-edit', 'conflict-resolution')
+                )
+            """, (existing_page["id"],))
+            has_manual_edits = cursor.fetchone()[0]
+    finally:
+        conn.close()
+
+    # Build the combined set of source blocks for synthesis
+    all_items = list(items)  # Start with new blocks
+
+    if existing_page and existing_blocks_data and not has_manual_edits:
+        # Merge: collect existing block hashes to avoid duplicates
+        new_hashes = {block.content_hash for block, _ in items}
+        existing_kept = 0
+        for eb in existing_blocks_data:
+            if eb.get("content_hash") not in new_hashes:
+                # Create a lightweight stand-in for existing blocks
+                existing_kept += 1
+                # We need block + classification pairs for synthesis
+                # Create minimal objects from stored JSON
+                from parse_docx import ContentBlock
+                from classify_entities import EntityClassification
+                fake_block = ContentBlock(
+                    doc_filename=eb.get("source_doc", "unknown"),
+                    heading_path=eb.get("heading_path", []),
+                    paragraph_index=eb.get("paragraph_index", 0),
+                    text=eb.get("text", ""),
+                    style="",
+                    block_type=eb.get("block_type", "paragraph"),
+                )
+                fake_classification = EntityClassification(
+                    primary_entity=entity_name,
+                    entity_type=entity_type,
+                    section_type=eb.get("section_type", "other"),
+                    mentioned_entities=[],
+                    confidence=0.9,
+                    relevant_entities=[entity_name],
+                )
+                all_items.append((fake_block, fake_classification))
+        if existing_kept > 0:
+            print(f"      Merging {existing_kept} existing blocks + {len(items)} new blocks")
+
+    # Synthesize wiki content with citations from ALL blocks
+    print(f"    Synthesizing: {entity_name} ({len(all_items)} total blocks)...")
+    content_md = synthesize_wiki_page(entity_name, entity_type, all_items, llm_client)
+    source_blocks_json = assemble_source_blocks_json(all_items)
 
     # Rate limit between synthesis calls (only needed for cloud APIs)
     if not is_local_llm:
@@ -143,21 +205,9 @@ def store_entity_page(entity_name, entity_type, items, file_path, ingestion_run_
         cursor = conn.cursor()
         result = "created"
 
-        # Check if page exists
-        cursor.execute("SELECT id, origin, version_number FROM pages WHERE slug = %s", (slug,))
-        existing_page = cursor.fetchone()
-
         if existing_page:
-            page_id, current_origin, current_version = existing_page
-
-            # Check for manual edits
-            cursor.execute("""
-                SELECT EXISTS(
-                    SELECT 1 FROM versions
-                    WHERE page_id = %s AND origin IN ('manual-edit', 'conflict-resolution')
-                )
-            """, (page_id,))
-            has_manual_edits = cursor.fetchone()[0]
+            page_id = existing_page["id"]
+            current_version = existing_page["version_number"]
 
             if has_manual_edits:
                 # CONFLICT: store as pending
@@ -174,7 +224,7 @@ def store_entity_page(entity_name, entity_type, items, file_path, ingestion_run_
                 )
                 result = "conflict"
             else:
-                # Update with new synthesized content
+                # Update with merged + re-synthesized content
                 new_version = current_version + 1
                 cursor.execute("""
                     INSERT INTO versions (id, page_id, version_number, content_markdown,
@@ -182,7 +232,7 @@ def store_entity_page(entity_name, entity_type, items, file_path, ingestion_run_
                     VALUES (%s, %s, %s, %s, %s::jsonb, 'ai-extracted',
                         %s)
                 """, (str(uuid.uuid4()), page_id, new_version, content_md,
-                      source_blocks_json, f"Re-ingestion from {file_path.name}"))
+                      source_blocks_json, f"Merged content from {file_path.name}"))
 
                 cursor.execute("""
                     UPDATE pages SET content_markdown = %s, source_blocks = %s::jsonb,
@@ -207,7 +257,7 @@ def store_entity_page(entity_name, entity_type, items, file_path, ingestion_run_
             """, (str(uuid.uuid4()), page_id, content_md, source_blocks_json))
             result = "created"
 
-        # Store source chunks
+        # Store source chunks (only new ones — existing ones are already stored)
         for block, classification in items:
             try:
                 cursor.execute("""

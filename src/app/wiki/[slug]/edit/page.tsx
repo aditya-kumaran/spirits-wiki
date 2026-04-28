@@ -18,6 +18,7 @@ export default function EditPage() {
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showHelp, setShowHelp] = useState(false);
 
   // Image upload state
   const [uploading, setUploading] = useState(false);
@@ -100,17 +101,85 @@ export default function EditPage() {
     <div>
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-2xl font-bold">Editing: {entityName}</h1>
-        <Link
-          href={`/wiki/${slug}`}
-          className="text-sm text-gray-500 hover:text-gray-700 no-underline"
-        >
-          Cancel
-        </Link>
+        <div className="flex gap-2">
+          <button
+            onClick={() => setShowHelp(!showHelp)}
+            className="text-sm text-gray-500 hover:text-gray-700 cursor-pointer px-2 py-1 border border-gray-300 rounded"
+          >
+            {showHelp ? "Hide Help" : "Formatting Help"}
+          </button>
+          <Link
+            href={`/wiki/${slug}`}
+            className="text-sm text-gray-500 hover:text-gray-700 no-underline px-2 py-1"
+          >
+            Cancel
+          </Link>
+        </div>
       </div>
 
       {error && (
         <div className="bg-red-50 border border-red-300 text-red-700 p-3 rounded mb-4 text-sm">
           {error}
+        </div>
+      )}
+
+      {/* Formatting help panel */}
+      {showHelp && (
+        <div className="bg-blue-50 border border-blue-200 rounded p-4 mb-4 text-sm">
+          <h3 className="font-semibold mb-2">Formatting Guide</h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <h4 className="font-medium text-gray-700 mb-1">Wiki Links</h4>
+              <p className="text-gray-600 mb-1">
+                Link to other wiki pages using double brackets:
+              </p>
+              <code className="bg-white px-2 py-1 rounded text-xs block">
+                {"[[Catherine Stormborn]]"}
+              </code>
+              <p className="text-gray-500 text-xs mt-1">
+                Only links to existing pages will be clickable. Non-existent
+                pages appear as plain text.
+              </p>
+            </div>
+            <div>
+              <h4 className="font-medium text-gray-700 mb-1">Citations</h4>
+              <p className="text-gray-600 mb-1">
+                Add footnote citations with:
+              </p>
+              <code className="bg-white px-2 py-1 rounded text-xs block">
+                {"Some fact. [^1]"}
+              </code>
+              <p className="text-gray-600 mt-1 mb-1">
+                Define references at the bottom:
+              </p>
+              <code className="bg-white px-2 py-1 rounded text-xs block">
+                {"[^1]: **Source.docx**, §Heading — \"quote\""}
+              </code>
+            </div>
+            <div>
+              <h4 className="font-medium text-gray-700 mb-1">Headings</h4>
+              <code className="bg-white px-2 py-1 rounded text-xs block">
+                {"## Section Heading"}
+              </code>
+            </div>
+            <div>
+              <h4 className="font-medium text-gray-700 mb-1">Emphasis</h4>
+              <code className="bg-white px-2 py-1 rounded text-xs block">
+                {"**bold** and *italic*"}
+              </code>
+            </div>
+          </div>
+          <p className="text-xs text-gray-400 mt-3">
+            Full documentation:{" "}
+            <a
+              href="https://github.com/aditya-kumaran/spirits-wiki/blob/main/docs/EDITING.md"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-blue-500 underline"
+            >
+              docs/EDITING.md
+            </a>
+          </p>
         </div>
       )}
 

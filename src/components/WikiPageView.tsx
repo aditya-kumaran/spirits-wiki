@@ -1,40 +1,62 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import type { WikiPage, WikiImage } from "@/types";
+import rehypeRaw from "rehype-raw";
+import type { WikiPage, WikiImage, EntityType } from "@/types";
+import { ENTITY_TYPES } from "@/types";
 
-function CitationTooltip({ citation }: { citation: string }) {
-  const [open, setOpen] = useState(false);
-  return (
-    <span className="relative inline">
-      <button
-        onClick={() => setOpen(!open)}
-        className="text-[var(--color-wiki-link)] text-xs align-super cursor-pointer hover:underline ml-0.5"
-      >
-        [{citation.split("|")[0]}]
-      </button>
-      {open && (
-        <span className="absolute z-50 left-0 top-full mt-1 w-80 bg-white border border-[var(--color-wiki-border)] rounded shadow-lg p-3 text-xs text-gray-700 leading-relaxed">
-          <span className="font-semibold block mb-1">Source:</span>
-          {citation.split("|").slice(1).join("|")}
-          <button
-            onClick={() => setOpen(false)}
-            className="block mt-2 text-[var(--color-wiki-link)] cursor-pointer"
-          >
-            Close
-          </button>
-        </span>
-      )}
-    </span>
-  );
+/**
+ * Pre-process markdown to convert footnote syntax into proper HTML anchors.
+ * - Inline [^N] becomes a clickable superscript linking to #ref-N
+ * - Reference [^N]: at line start becomes an anchored numbered entry
+ */
+function preprocessCitations(md: string): string {
+  // Split into lines for reference processing
+  const lines = md.split("\n");
+  const processedLines: string[] = [];
+  let inReferences = false;
+
+  for (const line of lines) {
+    if (/^##\s*References?\s*$/i.test(line)) {
+      inReferences = true;
+      processedLines.push(line);
+      continue;
+    }
+
+    if (inReferences) {
+      // Convert [^N]: into anchored numbered reference
+      const refMatch = line.match(/^\[\^(\d+)\]:\s*(.*)/);
+      if (refMatch) {
+        const num = refMatch[1];
+        const rest = refMatch[2];
+        processedLines.push(
+          `<span id="ref-${num}" class="citation-ref"><strong>${num}.</strong></span> ${rest}`
+        );
+        continue;
+      }
+    }
+
+    // In content: convert inline [^N] into clickable superscript links
+    // But skip lines that start with [^N]: (definitions)
+    if (!line.match(/^\[\^\d+\]:/)) {
+      const processed = line.replace(
+        /\[\^(\d+)\]/g,
+        '<sup><a href="#ref-$1" class="citation-link">[$1]</a></sup>'
+      );
+      processedLines.push(processed);
+    } else {
+      processedLines.push(line);
+    }
+  }
+
+  return processedLines.join("\n");
 }
 
 function ImageGallery({
   images,
-  slug,
   onSetPrimary,
 }: {
   images: WikiImage[];
@@ -176,13 +198,103 @@ function ImageUploadWidget({
   );
 }
 
+function EntityTypeEditor({
+  slug,
+  currentType,
+  onUpdated,
+}: {
+  slug: string;
+  currentType: string;
+  onUpdated: (newType: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [selected, setSelected] = useState(currentType);
+  const [saving, setSaving] = useState(false);
+
+  const handleSave = async () => {
+    if (selected === currentType) {
+      setEditing(false);
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/pages/${slug}/type`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ entityType: selected }),
+      });
+      if (res.ok) {
+        onUpdated(selected);
+        setEditing(false);
+      }
+    } catch {
+      // silently fail
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!editing) {
+    return (
+      <button
+        onClick={() => setEditing(true)}
+        className="px-2 py-0.5 bg-gray-100 rounded capitalize text-sm text-gray-700 hover:bg-gray-200 cursor-pointer"
+        title="Click to change entity type"
+      >
+        {currentType}
+      </button>
+    );
+  }
+
+  return (
+    <span className="inline-flex items-center gap-1">
+      <select
+        value={selected}
+        onChange={(e) => setSelected(e.target.value)}
+        className="px-2 py-0.5 border border-gray-300 rounded text-sm capitalize"
+      >
+        {ENTITY_TYPES.map((t) => (
+          <option key={t} value={t} className="capitalize">
+            {t}
+          </option>
+        ))}
+      </select>
+      <button
+        onClick={handleSave}
+        disabled={saving}
+        className="px-2 py-0.5 bg-[var(--color-wiki-accent)] text-white rounded text-xs hover:bg-[var(--color-wiki-accent-hover)] disabled:opacity-50"
+      >
+        {saving ? "..." : "Save"}
+      </button>
+      <button
+        onClick={() => {
+          setSelected(currentType);
+          setEditing(false);
+        }}
+        className="px-2 py-0.5 bg-gray-200 text-gray-600 rounded text-xs hover:bg-gray-300"
+      >
+        Cancel
+      </button>
+    </span>
+  );
+}
+
 export function WikiPageView({ page: initialPage }: { page: WikiPage }) {
   const [page, setPage] = useState(initialPage);
+  const [validSlugs, setValidSlugs] = useState<Record<string, string>>({});
 
   const primaryImage = page.images?.find((img) => img.isPrimary);
   const allImages = page.images || [];
 
-  const refreshPage = async () => {
+  // Fetch all valid page slugs for wiki link validation
+  useEffect(() => {
+    fetch("/api/pages/slugs")
+      .then((r) => r.json())
+      .then((data) => setValidSlugs(data))
+      .catch(() => {});
+  }, []);
+
+  const refreshPage = useCallback(async () => {
     try {
       const res = await fetch(`/api/pages/${page.slug}`);
       if (res.ok) {
@@ -192,7 +304,7 @@ export function WikiPageView({ page: initialPage }: { page: WikiPage }) {
     } catch {
       // silently fail refresh
     }
-  };
+  }, [page.slug]);
 
   const handleSetPrimary = async (imageId: string) => {
     try {
@@ -206,6 +318,13 @@ export function WikiPageView({ page: initialPage }: { page: WikiPage }) {
       // silently fail
     }
   };
+
+  const handleTypeUpdated = (newType: string) => {
+    setPage((prev) => ({ ...prev, entityType: newType }));
+  };
+
+  // Pre-process markdown for proper citation rendering
+  const processedMarkdown = preprocessCitations(page.contentMarkdown);
 
   return (
     <div>
@@ -243,9 +362,11 @@ export function WikiPageView({ page: initialPage }: { page: WikiPage }) {
       </div>
 
       <div className="flex items-center gap-2 mb-4 text-sm text-gray-500">
-        <span className="px-2 py-0.5 bg-gray-100 rounded capitalize">
-          {page.entityType}
-        </span>
+        <EntityTypeEditor
+          slug={page.slug}
+          currentType={page.entityType}
+          onUpdated={handleTypeUpdated}
+        />
         <span>
           Version {page.versionNumber} &middot; Last modified{" "}
           {new Date(page.lastModified).toLocaleString()}
@@ -302,19 +423,43 @@ export function WikiPageView({ page: initialPage }: { page: WikiPage }) {
         )}
       </div>
 
-      {/* Main content — render markdown with citation support */}
+      {/* Main content — render markdown with citation and wiki link support */}
       <div className="wiki-content">
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
+          rehypePlugins={[rehypeRaw]}
           components={{
             // Render wiki cross-links: [[Entity Name]] becomes a link
             p: ({ children, ...props }) => {
-              const processed = processWikiLinks(children);
+              const processed = processWikiLinks(children, validSlugs);
               return <p {...props}>{processed}</p>;
+            },
+            li: ({ children, ...props }) => {
+              const processed = processWikiLinks(children, validSlugs);
+              return <li {...props}>{processed}</li>;
+            },
+            // Style citation links
+            a: ({ href, children, ...props }) => {
+              if (href?.startsWith("#ref-")) {
+                return (
+                  <a
+                    href={href}
+                    className="citation-link text-[var(--color-wiki-link)] no-underline hover:underline"
+                    {...props}
+                  >
+                    {children}
+                  </a>
+                );
+              }
+              return (
+                <a href={href} {...props}>
+                  {children}
+                </a>
+              );
             },
           }}
         >
-          {page.contentMarkdown}
+          {processedMarkdown}
         </ReactMarkdown>
       </div>
 
@@ -343,8 +488,12 @@ export function WikiPageView({ page: initialPage }: { page: WikiPage }) {
 
 /**
  * Process children to find [[wiki links]] and turn them into actual links.
+ * Only creates links for pages that actually exist in the database.
  */
-function processWikiLinks(children: React.ReactNode): React.ReactNode {
+function processWikiLinks(
+  children: React.ReactNode,
+  validSlugs: Record<string, string>
+): React.ReactNode {
   if (!children) return children;
 
   if (typeof children === "string") {
@@ -360,21 +509,28 @@ function processWikiLinks(children: React.ReactNode): React.ReactNode {
       const entityName = match[1];
       const slug = entityName
         .toLowerCase()
-        .replace(/['"'""]/g, "")
+        .replace(/['"\u2019\u201C\u201D]/g, "")
         .replace(/[^a-z0-9 -]/g, "")
         .replace(/\s+/g, "-")
         .replace(/-+/g, "-")
         .replace(/^-|-$/g, "")
         .slice(0, 100);
-      parts.push(
-        <Link
-          key={`${slug}-${match.index}`}
-          href={`/wiki/${slug}`}
-          className="text-[var(--color-wiki-link)] hover:underline"
-        >
-          {entityName}
-        </Link>
-      );
+
+      // Only create a link if the page actually exists
+      if (slug in validSlugs) {
+        parts.push(
+          <Link
+            key={`${slug}-${match.index}`}
+            href={`/wiki/${slug}`}
+            className="text-[var(--color-wiki-link)] hover:underline"
+          >
+            {entityName}
+          </Link>
+        );
+      } else {
+        // Page doesn't exist — render as plain text
+        parts.push(entityName);
+      }
       lastIndex = regex.lastIndex;
     }
 
@@ -387,7 +543,7 @@ function processWikiLinks(children: React.ReactNode): React.ReactNode {
 
   if (Array.isArray(children)) {
     return children.map((child, i) => (
-      <span key={i}>{processWikiLinks(child)}</span>
+      <span key={i}>{processWikiLinks(child, validSlugs)}</span>
     ));
   }
 

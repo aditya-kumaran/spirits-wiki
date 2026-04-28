@@ -146,3 +146,53 @@ body {
   border-radius: 4px;
   font-size: 0.85rem;
 }
+
+/* Citation styles */
+.wiki-content sup {
+  font-size: 0.75em;
+  line-height: 0;
+  vertical-align: super;
+}
+
+.wiki-content .citation-link {
+  color: var(--color-wiki-link);
+  text-decoration: none;
+  font-weight: 600;
+  padding: 0 1px;
+}
+
+.wiki-content .citation-link:hover {
+  text-decoration: underline;
+  color: var(--color-wiki-accent-hover);
+}
+
+.wiki-content .citation-ref {
+  display: inline;
+  scroll-margin-top: 2rem;
+  color: var(--color-wiki-accent);
+  font-weight: 600;
+}
+
+/* Highlight target citation when navigated to via anchor */
+.wiki-content .citation-ref:target {
+  background-color: #fef9c3;
+  padding: 2px 4px;
+  border-radius: 3px;
+}
+
+.wiki-content ul {
+  list-style: disc;
+  padding-left: 1.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.wiki-content ol {
+  list-style: decimal;
+  padding-left: 1.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.wiki-content li {
+  margin-bottom: 0.25rem;
+  line-height: 1.6;
+}
