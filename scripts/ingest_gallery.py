@@ -105,11 +105,22 @@ def ingest_gallery(file_path: Path, save_unmatched: bool = False):
         elif entity_name.lower() in name_to_page:
             page_id = name_to_page[entity_name.lower()][0]
         else:
-            # Try partial matching (e.g., "John Smith" matches "john-smith" page)
-            for page_slug, (pid, pname) in slug_to_page.items():
-                if pname.lower() == entity_name.lower():
+            # Try first-name matching: "John" matches "John Smith"
+            # All character first names are unique, so this is safe
+            entity_lower = entity_name.lower().strip()
+            for pname_lower, (pid, _pslug) in name_to_page.items():
+                # Check if page entity name starts with the gallery heading as a first name
+                if pname_lower.startswith(entity_lower + " "):
                     page_id = pid
+                    print(f"    First-name match: '{entity_name}' -> '{pname_lower}'")
                     break
+
+            # Also try the reverse: gallery has full name, page has partial
+            if not page_id:
+                for pname_lower, (pid, _pslug) in name_to_page.items():
+                    if entity_lower.startswith(pname_lower + " ") or pname_lower == entity_lower:
+                        page_id = pid
+                        break
 
         if not page_id:
             unmatched += 1
