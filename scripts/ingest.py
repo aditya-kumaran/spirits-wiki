@@ -52,10 +52,23 @@ def slugify(name: str) -> str:
 
 def is_proper_noun_entity(name: str) -> bool:
     """
-    Filter out generic/non-entity terms.
+    Filter out generic/non-entity terms and pronouns.
     Returns True only for names that look like proper nouns.
     """
     if not name or len(name) < 2:
+        return False
+
+    # Reject pronouns — these should never become entity pages
+    pronouns = {
+        "he", "him", "his", "himself",
+        "she", "her", "hers", "herself",
+        "they", "them", "their", "theirs", "themselves",
+        "it", "its", "itself",
+        "we", "us", "our", "ours", "ourselves",
+        "i", "me", "my", "mine", "myself",
+        "you", "your", "yours", "yourself", "yourselves",
+    }
+    if name.lower().strip() in pronouns:
         return False
 
     # Reject single common words
@@ -332,13 +345,24 @@ def ingest_document(file_path: Path, llm_client: LLMClient, min_blocks: int = 2,
 
     print(f"  Classified {len(classified_blocks)} blocks to entities")
 
-    # Step 3: Group by entity (no DB needed)
+    # Step 3: Group by entity using multi-entity attribution
+    # A single block can be relevant to multiple entities (e.g., "she injured him"
+    # is relevant to both Catherine and Jacob). We use relevant_entities from the
+    # classifier to attribute blocks to all entities they contain info about.
     entity_blocks: dict = {}
     for block, classification in classified_blocks:
-        entity_name = classification.primary_entity
-        if entity_name not in entity_blocks:
-            entity_blocks[entity_name] = []
-        entity_blocks[entity_name].append((block, classification))
+        # Get all entities this block is relevant to
+        relevant = getattr(classification, 'relevant_entities', None) or []
+        if not relevant:
+            # Fallback: just use primary_entity
+            relevant = [classification.primary_entity]
+
+        for entity_name in relevant:
+            if not entity_name or entity_name.lower() in ("unknown", "n/a", "none"):
+                continue
+            if entity_name not in entity_blocks:
+                entity_blocks[entity_name] = []
+            entity_blocks[entity_name].append((block, classification))
 
     # Step 4: FILTER — only keep entities with enough blocks AND proper noun names
     filtered_entities = {}
