@@ -22,6 +22,8 @@ class ContentBlock:
     text: str
     style: str
     block_type: str  # "paragraph" | "table_cell" | "heading"
+    indent_level: int = 0  # 0 = top-level, 1+ = nested bullets/sub-items
+    parent_context: str = ""  # Text of the parent item (for sub-bullets)
     content_hash: str = field(init=False)
 
     def __post_init__(self):
@@ -42,10 +44,56 @@ class ExtractedImage:
         self.content_hash = hashlib.sha256(self.image_bytes).hexdigest()
 
 
+def _get_indent_level(para) -> int:
+    """
+    Determine the indentation/nesting level of a paragraph.
+    Checks list level (numPr/ilvl), style name ('List Bullet 2', etc.),
+    and raw indentation (ind/@left).
+    """
+    # Check for explicit list level via numbering properties
+    pPr = para._element.find(qn('w:pPr'))
+    if pPr is not None:
+        numPr = pPr.find(qn('w:numPr'))
+        if numPr is not None:
+            ilvl = numPr.find(qn('w:ilvl'))
+            if ilvl is not None:
+                try:
+                    return int(ilvl.get(qn('w:val'), '0'))
+                except (ValueError, TypeError):
+                    pass
+
+        # Check raw indentation
+        ind = pPr.find(qn('w:ind'))
+        if ind is not None:
+            left = ind.get(qn('w:left'), '0')
+            try:
+                # Indentation in twips; ~720 twips per indent level
+                twips = int(left)
+                if twips > 0:
+                    return min(twips // 720, 5)  # Cap at 5 levels
+            except (ValueError, TypeError):
+                pass
+
+    # Check style name for list level hints
+    style_name = para.style.name if para.style else ""
+    if "List" in style_name or "Bullet" in style_name:
+        # e.g., "List Bullet 2" -> level 1, "List Bullet 3" -> level 2
+        for part in style_name.split():
+            try:
+                level_num = int(part)
+                return max(0, level_num - 1)
+            except ValueError:
+                continue
+        return 0  # Base list level
+
+    return 0
+
+
 def parse_docx(file_path: Path) -> tuple[list[ContentBlock], list[ExtractedImage]]:
     """
     Parse a .docx file into ContentBlocks and extracted images.
     All text is extracted verbatim -- no transformation.
+    Captures indentation level and parent context for pronoun resolution.
     """
     doc = Document(str(file_path))
 
@@ -54,12 +102,17 @@ def parse_docx(file_path: Path) -> tuple[list[ContentBlock], list[ExtractedImage
     current_heading_path: list[str] = []
     heading_levels: list[int] = []
 
+    # Track recent top-level text for parent context
+    # Stack: [(indent_level, text)] — most recent items at each level
+    context_stack: list[tuple[int, str]] = []
+
     for i, para in enumerate(doc.paragraphs):
         text = para.text.strip()
         if not text:
             continue
 
         style_name = para.style.name if para.style else "Normal"
+        indent_level = _get_indent_level(para)
 
         # Track heading hierarchy
         if style_name.startswith("Heading"):
@@ -74,6 +127,8 @@ def parse_docx(file_path: Path) -> tuple[list[ContentBlock], list[ExtractedImage
 
             current_heading_path.append(text)
             heading_levels.append(level)
+            # Reset context stack on new heading
+            context_stack = []
 
             blocks.append(ContentBlock(
                 doc_filename=file_path.name,
@@ -82,8 +137,25 @@ def parse_docx(file_path: Path) -> tuple[list[ContentBlock], list[ExtractedImage
                 text=text,
                 style=style_name,
                 block_type="heading",
+                indent_level=0,
+                parent_context="",
             ))
         else:
+            # Determine parent context from context stack
+            parent_context = ""
+            if indent_level > 0 and context_stack:
+                # Find the most recent item at a lower indent level
+                for ctx_level, ctx_text in reversed(context_stack):
+                    if ctx_level < indent_level:
+                        parent_context = ctx_text
+                        break
+
+            # Update context stack: remove items at same or deeper level
+            context_stack = [
+                (lvl, txt) for lvl, txt in context_stack if lvl < indent_level
+            ]
+            context_stack.append((indent_level, text))
+
             blocks.append(ContentBlock(
                 doc_filename=file_path.name,
                 heading_path=list(current_heading_path),
@@ -91,6 +163,8 @@ def parse_docx(file_path: Path) -> tuple[list[ContentBlock], list[ExtractedImage
                 text=text,
                 style=style_name,
                 block_type="paragraph",
+                indent_level=indent_level,
+                parent_context=parent_context,
             ))
 
     # Extract table content

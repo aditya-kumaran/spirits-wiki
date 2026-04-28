@@ -45,9 +45,20 @@ text or any rewritten version of it in your response.
 
 CRITICAL — PRONOUN RESOLUTION:
 The text may contain pronouns (he, she, they, him, her, etc.) that refer to named characters.
-You MUST resolve these pronouns to the actual character names using the heading context and
-surrounding clues. For example, if the heading says "Catherine" and the text says "she went
-to Dubai", you must identify that "she" = Catherine.
+You MUST resolve these pronouns to the actual character names using ALL available context:
+
+1. HEADING CONTEXT: The heading hierarchy tells you which entity/section this text belongs to.
+   e.g., if headings say "Characters > Catherine", then "she" likely = Catherine.
+
+2. STRUCTURAL CONTEXT (indentation/nesting): Sub-bullets and indented items inherit context
+   from their parent item. For example:
+     "Hunter still wins everyone over at Natalie's hometown"
+       - "The russians like him, and his new pack"
+       - "He's charismatic and brave"
+   Here, "him" and "He" in the sub-points refer to "Hunter" from the parent bullet.
+   The parent context will be provided when available.
+
+3. SURROUNDING TEXT: Use names mentioned earlier in the same passage to resolve pronouns.
 
 When multiple characters are involved (e.g., "she injured him"), resolve ALL pronouns:
 identify who "she" and "him" refer to. Include ALL characters that the text contains
@@ -69,7 +80,7 @@ Text block:
 \"\"\"
 
 Context — this text appears under these headings: {heading_path}
-
+{structural_context}
 Respond with ONLY valid JSON. No other text. Example:
 {{"primary_entity": "Catherine", "entity_type": "character", "section_type": "history", "mentioned_entities": ["Jacob", "Dubai", "Singapore"], "relevant_entities": ["Catherine", "Jacob"], "confidence": 0.85}}"""
 
@@ -90,9 +101,21 @@ def classify_block(
     Pronouns are resolved to actual entity names.
     """
     heading_str = " > ".join(block.heading_path) if block.heading_path else "(no heading context)"
+
+    # Build structural context string
+    structural_parts = []
+    parent_ctx = getattr(block, 'parent_context', '') or ''
+    indent_level = getattr(block, 'indent_level', 0) or 0
+    if parent_ctx:
+        structural_parts.append(f"Parent item (this text is a sub-point of): \"{parent_ctx}\"")
+    if indent_level > 0:
+        structural_parts.append(f"Nesting level: {indent_level} (this is an indented/nested item)")
+    structural_context = "\n".join(structural_parts) if structural_parts else ""
+
     prompt = CLASSIFICATION_PROMPT.format(
         text=block.text[:2000],  # Truncate very long blocks
         heading_path=heading_str,
+        structural_context=structural_context,
     )
 
     for attempt in range(max_retries):
