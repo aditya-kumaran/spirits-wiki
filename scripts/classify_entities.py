@@ -135,9 +135,14 @@ def classify_block(
 
             result = json.loads(content)
 
-            primary = result.get("primary_entity", "Unknown")
-            mentioned = result.get("mentioned_entities", [])
-            relevant = result.get("relevant_entities", [])
+            primary = result.get("primary_entity") or "Unknown"
+            mentioned = result.get("mentioned_entities") or []
+            relevant = result.get("relevant_entities") or []
+
+            # Ensure all values are strings (LLM may return None inside lists)
+            mentioned = [str(e) for e in mentioned if e]
+            relevant = [str(e) for e in relevant if e]
+            primary = str(primary) if primary else "Unknown"
 
             # Filter out any pronouns that slipped through
             if is_pronoun(primary):
