@@ -82,17 +82,19 @@ model CrossLink {
 }
 
 model Image {
-  id          String   @id @default(uuid())
-  pageId      String?  @map("page_id")
-  filename    String
-  altText     String?  @map("alt_text")
-  caption     String?
-  url         String
-  sourceDoc   String?  @map("source_doc")
-  isPrimary   Boolean  @default(false) @map("is_primary")
-  origin      String   @default("ai-extracted")
-  sortOrder   Int      @default(0) @map("sort_order")
-  createdAt   DateTime @default(now()) @map("created_at")
+  id            String   @id @default(uuid())
+  pageId        String?  @map("page_id")
+  filename      String
+  altText       String?  @map("alt_text")
+  caption       String?
+  url           String
+  sourceDoc     String?  @map("source_doc")
+  sourceHeading String?  @map("source_heading")
+  contentHash   String?  @map("content_hash")
+  isPrimary     Boolean  @default(false) @map("is_primary")
+  origin        String   @default("ai-extracted")
+  sortOrder     Int      @default(0) @map("sort_order")
+  createdAt     DateTime @default(now()) @map("created_at")
 
   page Page? @relation(fields: [pageId], references: [id], onDelete: SetNull)
 

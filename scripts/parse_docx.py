@@ -1,6 +1,7 @@
 """
 Parses .docx files into ContentBlocks, preserving verbatim text.
 Also extracts embedded images.
+Supports gallery document format (H1 = entity, images + captions).
 """
 import hashlib
 import os
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 from docx import Document
+from docx.oxml.ns import qn
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 
 
@@ -140,3 +142,126 @@ def parse_docx(file_path: Path) -> tuple[list[ContentBlock], list[ExtractedImage
                 print(f"  Warning: Failed to extract image {image_idx}: {e}")
 
     return blocks, images
+
+
+@dataclass
+class GalleryImage:
+    """An image extracted from a gallery-format document, paired with its entity and caption."""
+    entity_name: str
+    image_index: int
+    filename: str
+    content_type: str
+    image_bytes: bytes
+    caption: Optional[str]
+    doc_filename: str
+    content_hash: str = field(init=False)
+
+    def __post_init__(self):
+        self.content_hash = hashlib.sha256(self.image_bytes).hexdigest()
+
+
+def _extract_images_from_paragraph(para, doc_part) -> list[tuple[bytes, str]]:
+    """
+    Extract inline image bytes from a paragraph's XML.
+    Returns list of (image_bytes, content_type) tuples.
+    """
+    images = []
+    # Find all <a:blip> elements which reference embedded images
+    for blip in para._element.iter(qn('a:blip')):
+        r_embed = blip.get(qn('r:embed'))
+        if not r_embed:
+            continue
+        try:
+            rel = doc_part.rels[r_embed]
+            image_part = rel.target_part
+            images.append((image_part.blob, image_part.content_type or "image/png"))
+        except (KeyError, Exception):
+            continue
+    return images
+
+
+def parse_gallery_docx(file_path: Path) -> list[GalleryImage]:
+    """
+    Parse a gallery-format .docx file.
+
+    Expected structure (repeating for each character):
+        Heading 1: Character Name
+        [image paragraph(s)]
+        Plain text: caption(s) for the images above
+
+    Returns a flat list of GalleryImage objects, each linked to an entity name.
+    """
+    doc = Document(str(file_path))
+    gallery_images: list[GalleryImage] = []
+
+    current_entity: Optional[str] = None
+    # Buffer of images found under the current entity that don't yet have captions
+    pending_images: list[tuple[bytes, str]] = []  # (image_bytes, content_type)
+    global_img_idx = 0
+
+    ext_map = {
+        "image/png": ".png",
+        "image/jpeg": ".jpg",
+        "image/gif": ".gif",
+        "image/bmp": ".bmp",
+        "image/webp": ".webp",
+        "image/tiff": ".tiff",
+    }
+
+    def flush_pending(caption: Optional[str] = None):
+        """Flush pending images, assigning the given caption (or None) to each."""
+        nonlocal global_img_idx, pending_images
+        for img_bytes, ctype in pending_images:
+            ext = ext_map.get(ctype, ".png")
+            fname = f"{file_path.stem}_gallery_{global_img_idx}{ext}"
+            gallery_images.append(GalleryImage(
+                entity_name=current_entity or "Unknown",
+                image_index=global_img_idx,
+                filename=fname,
+                content_type=ctype,
+                image_bytes=img_bytes,
+                caption=caption,
+                doc_filename=file_path.name,
+            ))
+            global_img_idx += 1
+        pending_images = []
+
+    for para in doc.paragraphs:
+        style_name = para.style.name if para.style else "Normal"
+        text = para.text.strip()
+
+        # Detect Heading 1 or Heading 2 → new entity
+        if style_name in ("Heading 1", "Heading 2") and text:
+            # Flush any remaining images from previous entity with no caption
+            if pending_images and current_entity:
+                flush_pending(None)
+            current_entity = text
+            continue
+
+        if not current_entity:
+            continue
+
+        # Check if this paragraph contains images
+        para_images = _extract_images_from_paragraph(para, doc.part)
+
+        if para_images:
+            # If we had pending images waiting for a caption, flush them without one
+            # (because we hit another image paragraph instead of a caption)
+            if pending_images:
+                flush_pending(None)
+            pending_images = para_images
+            continue
+
+        # Plain text paragraph — treat as caption for pending images
+        if text and pending_images:
+            flush_pending(text)
+        elif text:
+            # Text but no pending images — could be a multi-line caption scenario
+            # or text between image groups. Skip it.
+            pass
+
+    # Flush any remaining images at end of document
+    if pending_images and current_entity:
+        flush_pending(None)
+
+    return gallery_images
