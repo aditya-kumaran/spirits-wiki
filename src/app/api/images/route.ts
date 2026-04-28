@@ -15,17 +15,25 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "No file provided" }, { status: 400 });
     }
 
-    let imageUrl: string;
+    let imageUrl: string = "";
 
     // Try Vercel Blob first (production), fall back to local storage (dev)
+    let usedBlob = false;
     if (process.env.BLOB_READ_WRITE_TOKEN) {
-      const { put } = await import("@vercel/blob");
-      const blob = await put(`wiki-images/${Date.now()}-${file.name}`, file, {
-        access: "public",
-      });
-      imageUrl = blob.url;
-    } else {
-      // Local file storage for development
+      try {
+        const { put } = await import("@vercel/blob");
+        const blob = await put(`wiki-images/${Date.now()}-${file.name}`, file, {
+          access: "public",
+        });
+        imageUrl = blob.url;
+        usedBlob = true;
+      } catch (blobError) {
+        console.warn("Vercel Blob upload failed, falling back to local storage:", blobError);
+      }
+    }
+
+    if (!usedBlob) {
+      // Local file storage (development or Blob fallback)
       const uploadsDir = path.join(process.cwd(), "public", "uploads");
       await mkdir(uploadsDir, { recursive: true });
 
