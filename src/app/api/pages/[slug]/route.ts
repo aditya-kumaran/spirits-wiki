@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
+import fs from "fs";
+import path from "path";
 
 export async function GET(
   request: NextRequest,
@@ -97,6 +99,53 @@ export async function PUT(
     console.error("Failed to update page:", error);
     return NextResponse.json(
       { error: "Failed to save page" },
+      { status: 500 }
+    );
+  }
+}
+
+export async function DELETE(
+  request: NextRequest,
+  { params }: { params: { slug: string } }
+) {
+  const { slug } = params;
+
+  try {
+    const page = await prisma.page.findUnique({
+      where: { slug },
+      include: { images: true },
+    });
+
+    if (!page) {
+      return NextResponse.json({ error: "Page not found" }, { status: 404 });
+    }
+
+    // Delete local image files if they exist
+    for (const image of page.images) {
+      if (image.url.startsWith("/uploads/")) {
+        const filePath = path.join(process.cwd(), "public", image.url);
+        try {
+          if (fs.existsSync(filePath)) {
+            fs.unlinkSync(filePath);
+          }
+        } catch {
+          // Non-critical — file may already be gone
+        }
+      }
+    }
+
+    // Delete images and source chunks explicitly (they use SetNull, not Cascade)
+    await prisma.image.deleteMany({ where: { pageId: page.id } });
+    await prisma.sourceChunk.deleteMany({ where: { pageId: page.id } });
+
+    // Delete the page (cascades to versions, cross_links, pending_ingestions)
+    await prisma.page.delete({ where: { slug } });
+
+    return NextResponse.json({ success: true, deleted: page.entityName });
+  } catch (error) {
+    console.error("Failed to delete page:", error);
+    return NextResponse.json(
+      { error: "Failed to delete page" },
       { status: 500 }
     );
   }

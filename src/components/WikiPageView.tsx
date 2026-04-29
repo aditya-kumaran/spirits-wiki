@@ -291,6 +291,8 @@ function InfoboxRow({ label, value }: { label: string; value: string }) {
 export function WikiPageView({ page: initialPage }: { page: WikiPage }) {
   const [page, setPage] = useState(initialPage);
   const [validSlugs, setValidSlugs] = useState<Record<string, string>>({});
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const primaryImage = page.images?.find((img) => img.isPrimary);
   const allImages = page.images || [];
@@ -335,6 +337,24 @@ export function WikiPageView({ page: initialPage }: { page: WikiPage }) {
     setPage((prev) => ({ ...prev, entityType: newType }));
   };
 
+  const handleDelete = async () => {
+    setDeleting(true);
+    try {
+      const res = await fetch(`/api/pages/${page.slug}`, { method: "DELETE" });
+      if (res.ok) {
+        window.location.href = "/";
+      } else {
+        const data = await res.json();
+        alert(`Failed to delete: ${data.error || "Unknown error"}`);
+      }
+    } catch {
+      alert("Failed to delete page");
+    } finally {
+      setDeleting(false);
+      setShowDeleteConfirm(false);
+    }
+  };
+
   // Pre-process markdown for proper citation rendering
   const processedMarkdown = preprocessCitations(page.contentMarkdown);
 
@@ -370,8 +390,44 @@ export function WikiPageView({ page: initialPage }: { page: WikiPage }) {
           >
             History
           </Link>
+          <button
+            onClick={() => setShowDeleteConfirm(true)}
+            className="px-3 py-1.5 bg-red-100 text-red-700 rounded text-sm hover:bg-red-200"
+          >
+            Delete
+          </button>
         </div>
       </div>
+
+      {/* Delete confirmation dialog */}
+      {showDeleteConfirm && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-md mx-4 shadow-xl">
+            <h3 className="text-lg font-bold text-gray-900 mb-2">Delete Page</h3>
+            <p className="text-gray-600 mb-4">
+              Are you sure you want to delete <strong>{page.entityName}</strong>?
+              This will permanently remove the page, all its versions, cross-links,
+              source chunks, and images.
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => setShowDeleteConfirm(false)}
+                className="px-4 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300"
+                disabled={deleting}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDelete}
+                className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700"
+                disabled={deleting}
+              >
+                {deleting ? "Deleting..." : "Yes, Delete"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="flex items-center gap-2 mb-4 text-sm text-gray-500">
         <EntityTypeEditor
