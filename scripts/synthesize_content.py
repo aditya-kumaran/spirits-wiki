@@ -1,9 +1,10 @@
 """
 Synthesizes wiki page content from source blocks using the LLM.
-The LLM writes coherent wiki prose, but every claim MUST have a citation
-pointing back to the exact source text from the .docx files.
+The LLM outputs STRUCTURED JSON with predefined section keys per entity type.
+The JSON is then deterministically converted to wiki markdown.
 
-Supports both Groq (cloud) and Ollama (local) via LLMClient.
+This approach prevents the LLM from injecting preamble text, generic intros,
+or straying from the template — the schema enforces the exact structure.
 
 Citations use markdown footnote format:
   Some claim about the entity. [^1]
@@ -19,129 +20,291 @@ from typing import Optional
 from llm_client import LLMClient
 
 
-# --- Character-specific prompt ---
-CHARACTER_SYNTHESIS_PROMPT = """You are writing a wiki article about the character "{entity_name}".
+# ──────────────────────────────────────────────────────────
+# JSON SCHEMA PROMPTS — one per entity type
+# ──────────────────────────────────────────────────────────
 
-You MUST write coherent, well-organized wiki prose. Every factual claim must be supported by a citation from the source material. Use markdown footnote syntax: [^1], [^2], etc.
+CHARACTER_JSON_PROMPT = """You are a wiki content generator. Given source material about the character "{entity_name}", produce a JSON object with EXACTLY the keys shown below. Do NOT output anything except valid JSON — no preamble, no explanation, no markdown fences.
 
-IMPORTANT STRUCTURAL RULES FOR CHARACTERS:
-
-1. Start with a metadata block in EXACTLY this format (fill in values from source material, leave blank if unknown):
-<!--META
-spirit: 
-aura: 
-eyes: 
-hair: 
-build: 
-style: 
-inspiration: 
-age: 
-power_set: 
-home_system: 
-language: 
--->
-
-2. After the metadata block, write the article with these sections:
-   - ## Overview — Brief description of who this character is
-   - ## Relationships — Notable relationships with other characters. Include personality traits that relate to how this character interacts with others. If source material references time periods, ages, parts, or eras, organize with ### subheadings for each era, e.g.:
-     ### Part One
-     ### Part Two
-     ### Golden Age (2000-3000)
-     Personality traits (e.g., "is jealous of brother", "very polite and coy") should be woven into the relevant relationship or era subsection rather than listed separately.
-   - ## Abilities — Powers, skills, or notable abilities (if any)
-   - ## Plot — THIS IS CRITICAL: Organize plot points by era/age/part. Use ### subheadings for each era, e.g.:
-     ### Part One
-     ### Part Two
-     ### Golden Age (2000-3000)
-     If source material references time periods, ages, parts, or eras, use those as subheadings. If no era info is available, just write the plot chronologically.
-   - Do NOT create a separate "Traits" section. Personality traits belong inside Relationships (organized by era if applicable).
-   - Skip sections that have no source material.
-
-3. Use [[Entity Name]] syntax to link to other wiki entities.
-4. Do NOT introduce the character by saying they are "a character in" or "from" any fictional world.
-5. Every factual statement MUST have a footnote citation [^N].
-6. End with ## References listing each footnote on its own line: [^N]: **Source.docx**, §Heading — "quote"
-
-SOURCE MATERIAL (each block has a reference ID):
-
-{source_blocks}
-
-Write the wiki article now. Start with the <!--META block, then the article content."""
-
-
-# --- Location-specific prompt ---
-LOCATION_SYNTHESIS_PROMPT = """You are writing a wiki article about the location "{entity_name}".
-
-You MUST write coherent, well-organized wiki prose. Every factual claim must be supported by a citation. Use markdown footnote syntax: [^1], [^2], etc.
-
-IMPORTANT STRUCTURAL RULES FOR LOCATIONS:
-
-1. Organize the article with these sections:
-   - ## Overview — Brief description of this location
-   - ## Geography — Physical features and layout
-   - ## Culture — Cultural significance and customs
-   - ## History — THIS IS CRITICAL: Organize history by era/age/part. Use ### subheadings for each era, e.g.:
-     ### Golden Age (2000-3000)
-     ### Age of Freedom (3000-)
-     ### Part One
-     If source material references time periods, ages, parts, or eras, use those as subheadings. If no era info is available, just write chronologically.
-   - ## Notable Residents — Important figures associated with this location
-   - Skip sections that have no source material.
-
-2. Use [[Entity Name]] syntax to link to other wiki entities.
-3. Do NOT introduce the location by saying it is "a location in" or "from" any fictional world.
-4. Every factual statement MUST have a footnote citation [^N].
-5. End with ## References listing each footnote on its own line: [^N]: **Source.docx**, §Heading — "quote"
-
-SOURCE MATERIAL (each block has a reference ID):
-
-{source_blocks}
-
-Write the wiki article now."""
-
-
-# --- Generic prompt (non-character, non-location) ---
-SYNTHESIS_PROMPT = """You are writing a wiki article about "{entity_name}" (type: {entity_type}).
-
-You MUST write coherent, well-organized wiki prose. However, every factual claim must be supported by a citation from the provided source material. Use markdown footnote syntax: [^1], [^2], etc.
+REQUIRED JSON SCHEMA:
+{{
+  "metadata": {{
+    "spirit": "",
+    "aura": "",
+    "eyes": "",
+    "hair": "",
+    "build": "",
+    "style": "",
+    "inspiration": "",
+    "age": "",
+    "power_set": "",
+    "home_system": "",
+    "language": ""
+  }},
+  "overview": "One or two paragraphs describing who this character is. Every claim needs a citation like [^1].",
+  "relationships": {{
+    "_default": "Content for relationships not tied to a specific era. [^N]",
+    "Part One": "Relationships and personality traits during Part One. [^N]",
+    "Part Two": "Relationships and personality traits during Part Two. [^N]"
+  }},
+  "abilities": "Description of powers, skills, or notable abilities. [^N]",
+  "plot": {{
+    "_default": "Plot points not tied to a specific era. [^N]",
+    "Part One": "Plot events during Part One. [^N]",
+    "Part Two": "Plot events during Part Two. [^N]"
+  }},
+  "references": [
+    "[^1]: **SourceFile.docx**, §Heading > Subheading — \\"exact short quote\\""
+  ]
+}}
 
 RULES:
-1. Write in an encyclopedic, third-person style.
-2. Every factual statement MUST have at least one footnote citation [^N] referencing the source material below.
-3. Do NOT invent any facts not present in the sources. If something is unclear, say so.
-4. Do NOT introduce the entity by saying they are "a character in" or "from" any fictional world. Just describe them directly — start with what they are or what they do.
-5. Organize the content with markdown ## headings. Use whichever sections are appropriate for the content (e.g., Overview, History, Relationships, Abilities, Culture, etc.). Skip sections that have no source material.
-6. Where the source material references time periods, ages, parts, or eras (e.g., "Golden Age", "Part One", "Age of Freedom"), organize relevant sections with ### subheadings for each era.
-7. Use [[Entity Name]] syntax to link to other wiki entities mentioned in the text (for cross-linking).
-8. At the end, include a ## References section listing every footnote with the source document, heading path, and a SHORT direct quote (the key phrase, not the full paragraph). Each reference MUST be on its own line in the format: [^N]: **Source.docx**, §Heading — "quote"
-
-SOURCE MATERIAL (each block has a reference ID):
-
-{source_blocks}
-
-Write the wiki article now. Remember: every claim needs a citation, and the References section must list all citations with source details and quotes."""
-
-
-SYNTHESIS_PROMPT_LARGE = """You are writing a wiki article about "{entity_name}" (type: {entity_type}).
-
-You have {block_count} source blocks. Write a comprehensive wiki article synthesizing this information.
-
-RULES:
-1. Write in an encyclopedic, third-person style.
-2. Every factual statement MUST have at least one footnote citation [^N].
-3. Do NOT invent any facts. Only use information from the sources.
-4. Do NOT introduce the entity by saying they are "a character in" or "from" any fictional world. Just describe them directly.
-5. Use ## headings to organize. For characters, use: Overview, Relationships (with ### era subheadings — weave personality traits into relationships/era subsections, do NOT create a separate Traits section), Abilities, Plot (with ### era subheadings). For locations, use: Overview, Geography, Culture, History (with ### era subheadings). Skip empty sections.
-6. Where source material references time periods, ages, or parts, organize Plot/History with ### subheadings for each era (e.g., ### Part One, ### Golden Age).
-7. Use [[Entity Name]] to link to other entities.
-8. End with ## References listing each footnote on its own line: [^N]: **Source.docx**, §Heading — "quote"
+- Fill "metadata" fields from source material. Leave as "" if unknown.
+- "overview": Write 1-2 paragraphs. Do NOT say "X is a character in the fictional world of Y" — just describe who they are directly.
+- "relationships": Object with era subheading keys. Use "_default" for content not tied to any era. Weave personality traits into relationship descriptions. Use [[Entity Name]] for wiki links.
+- "abilities": String. Set to "" if no abilities info exists.
+- "plot": Object with era subheading keys. Use "_default" for content not tied to any era. Organize chronologically within each era.
+- "references": Array of citation strings, one per footnote. Format: [^N]: **File.docx**, §Heading — "short quote"
+- Every factual claim in overview/relationships/abilities/plot MUST have a [^N] citation.
+- Use [[Entity Name]] syntax to link to other entities.
+- Era keys in relationships and plot should match what the source material mentions (e.g., "Part One", "Golden Age (2000-3000)", "Age of Freedom"). Only include eras that have source material.
+- Omit sections (set to "" or {{}}) if no source material exists for them.
 
 SOURCE MATERIAL:
 
 {source_blocks}
 
-Write the wiki article now."""
+Respond with ONLY the JSON object. No other text."""
 
+
+LOCATION_JSON_PROMPT = """You are a wiki content generator. Given source material about the location "{entity_name}", produce a JSON object with EXACTLY the keys shown below. Do NOT output anything except valid JSON — no preamble, no explanation, no markdown fences.
+
+REQUIRED JSON SCHEMA:
+{{
+  "overview": "One or two paragraphs describing this location. Every claim needs a citation like [^1].",
+  "geography": "Physical features and layout. [^N]",
+  "culture": "Cultural significance and customs. [^N]",
+  "history": {{
+    "_default": "History not tied to a specific era. [^N]",
+    "Golden Age (2000-3000)": "Events during this era. [^N]"
+  }},
+  "notable_residents": "Important figures associated with this location. [^N]",
+  "references": [
+    "[^1]: **SourceFile.docx**, §Heading > Subheading — \\"exact short quote\\""
+  ]
+}}
+
+RULES:
+- "overview": 1-2 paragraphs. Do NOT say "X is a location in the fictional world of Y."
+- "geography", "culture", "notable_residents": Strings. Set to "" if no info.
+- "history": Object with era subheading keys. Use "_default" for non-era content.
+- "references": Array of citation strings.
+- Every factual claim MUST have a [^N] citation.
+- Use [[Entity Name]] to link to other entities.
+- Only include eras/sections that have source material.
+
+SOURCE MATERIAL:
+
+{source_blocks}
+
+Respond with ONLY the JSON object. No other text."""
+
+
+GENERIC_JSON_PROMPT = """You are a wiki content generator. Given source material about "{entity_name}" (type: {entity_type}), produce a JSON object with EXACTLY the keys shown below. Do NOT output anything except valid JSON — no preamble, no explanation, no markdown fences.
+
+REQUIRED JSON SCHEMA:
+{{
+  "overview": "One or two paragraphs describing this entity. Every claim needs a citation like [^1].",
+  "sections": {{
+    "Section Name": "Content for this section. [^N]"
+  }},
+  "references": [
+    "[^1]: **SourceFile.docx**, §Heading > Subheading — \\"exact short quote\\""
+  ]
+}}
+
+RULES:
+- "overview": 1-2 paragraphs. Do NOT say "X is a Y in the fictional world of Z."
+- "sections": Object with section name keys. Choose appropriate section names for the entity type (e.g., History, Culture, Significance, Members, etc.). Only include sections with source material.
+- "references": Array of citation strings.
+- Every factual claim MUST have a [^N] citation.
+- Use [[Entity Name]] to link to other entities.
+
+SOURCE MATERIAL:
+
+{source_blocks}
+
+Respond with ONLY the JSON object. No other text."""
+
+
+# ──────────────────────────────────────────────────────────
+# JSON -> Markdown converters
+# ──────────────────────────────────────────────────────────
+
+def _render_era_section(section_name: str, data) -> str:
+    """Render a section that can be either a string or an object with era keys."""
+    lines = []
+    if isinstance(data, dict):
+        # Has era subsections
+        default_content = data.get("_default", "").strip()
+        if default_content:
+            lines.append(f"## {section_name}\n")
+            lines.append(default_content)
+            lines.append("")
+
+        has_eras = False
+        for key, val in data.items():
+            if key == "_default" or not val or not val.strip():
+                continue
+            if not has_eras:
+                if not default_content:
+                    lines.append(f"## {section_name}\n")
+                has_eras = True
+            lines.append(f"### {key}\n")
+            lines.append(val.strip())
+            lines.append("")
+
+        if not default_content and not has_eras:
+            return ""
+    elif isinstance(data, str) and data.strip():
+        lines.append(f"## {section_name}\n")
+        lines.append(data.strip())
+        lines.append("")
+    else:
+        return ""
+
+    return "\n".join(lines)
+
+
+def character_json_to_markdown(data: dict) -> tuple[str, dict]:
+    """Convert character JSON to markdown + metadata dict."""
+    metadata = {}
+    raw_meta = data.get("metadata", {})
+    if isinstance(raw_meta, dict):
+        appearance = {}
+        for key, val in raw_meta.items():
+            if not val or not str(val).strip():
+                continue
+            val = str(val).strip()
+            if key == "spirit":
+                metadata["spirit"] = val
+            elif key == "aura":
+                metadata["aura"] = val
+            elif key == "eyes":
+                appearance["eyes"] = val
+            elif key == "hair":
+                appearance["hair"] = val
+            elif key == "build":
+                appearance["build"] = val
+            elif key == "style":
+                appearance["style"] = val
+            elif key == "inspiration":
+                metadata["inspiration"] = val
+            elif key == "age":
+                metadata["age"] = val
+            elif key in ("power_set", "powerset"):
+                metadata["powerSet"] = val
+            elif key in ("home_system", "homesystem"):
+                metadata["homeSystem"] = val
+            elif key == "language":
+                metadata["language"] = val
+        if appearance:
+            metadata["appearance"] = appearance
+
+    parts = []
+
+    # Overview
+    overview = data.get("overview", "").strip()
+    if overview:
+        parts.append(f"## Overview\n\n{overview}")
+
+    # Relationships (era-based)
+    rel = _render_era_section("Relationships", data.get("relationships", ""))
+    if rel:
+        parts.append(rel)
+
+    # Abilities
+    abilities = data.get("abilities", "").strip()
+    if abilities:
+        parts.append(f"## Abilities\n\n{abilities}")
+
+    # Plot (era-based)
+    plot = _render_era_section("Plot", data.get("plot", ""))
+    if plot:
+        parts.append(plot)
+
+    # References
+    refs = data.get("references", [])
+    if refs and isinstance(refs, list):
+        parts.append("## References\n")
+        for ref in refs:
+            parts.append(str(ref))
+
+    md = "\n\n".join(parts)
+    return md, metadata
+
+
+def location_json_to_markdown(data: dict) -> tuple[str, dict]:
+    """Convert location JSON to markdown."""
+    parts = []
+
+    overview = data.get("overview", "").strip()
+    if overview:
+        parts.append(f"## Overview\n\n{overview}")
+
+    geography = data.get("geography", "").strip()
+    if geography:
+        parts.append(f"## Geography\n\n{geography}")
+
+    culture = data.get("culture", "").strip()
+    if culture:
+        parts.append(f"## Culture\n\n{culture}")
+
+    history = _render_era_section("History", data.get("history", ""))
+    if history:
+        parts.append(history)
+
+    residents = data.get("notable_residents", "").strip()
+    if residents:
+        parts.append(f"## Notable Residents\n\n{residents}")
+
+    refs = data.get("references", [])
+    if refs and isinstance(refs, list):
+        parts.append("## References\n")
+        for ref in refs:
+            parts.append(str(ref))
+
+    md = "\n\n".join(parts)
+    return md, {}
+
+
+def generic_json_to_markdown(data: dict) -> tuple[str, dict]:
+    """Convert generic entity JSON to markdown."""
+    parts = []
+
+    overview = data.get("overview", "").strip()
+    if overview:
+        parts.append(f"## Overview\n\n{overview}")
+
+    sections = data.get("sections", {})
+    if isinstance(sections, dict):
+        for name, content in sections.items():
+            if content and str(content).strip():
+                parts.append(f"## {name}\n\n{str(content).strip()}")
+
+    refs = data.get("references", [])
+    if refs and isinstance(refs, list):
+        parts.append("## References\n")
+        for ref in refs:
+            parts.append(str(ref))
+
+    md = "\n\n".join(parts)
+    return md, {}
+
+
+# ──────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────
 
 def format_source_blocks(items: list) -> str:
     """Format source blocks with reference IDs for the LLM prompt."""
@@ -156,6 +319,49 @@ def format_source_blocks(items: list) -> str:
     return "\n".join(lines)
 
 
+def extract_json_from_response(response: str) -> Optional[dict]:
+    """
+    Extract a JSON object from the LLM response.
+    Handles cases where the LLM wraps JSON in markdown fences or adds preamble.
+    """
+    if not response:
+        return None
+
+    text = response.strip()
+
+    # Strip markdown code fences
+    fence_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', text, re.DOTALL)
+    if fence_match:
+        text = fence_match.group(1).strip()
+
+    # Try to find JSON object boundaries
+    # Find the first { and last }
+    first_brace = text.find('{')
+    last_brace = text.rfind('}')
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        text = text[first_brace:last_brace + 1]
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
+def sanitize_content(content: str) -> str:
+    """Remove common LLM preamble patterns from content."""
+    # Strip "Here is the wiki article:" type prefixes
+    preamble_patterns = [
+        r'^Here\s+is\s+the\s+wiki\s+article[:\s]*\n*',
+        r'^Here\s+is\s+the\s+JSON[:\s]*\n*',
+        r'^#{1,2}\s+' + r'Spirits?\s+(?:One\s+)?Wiki\b.*?\n',
+        r'^This\s+is\s+a\s+comprehensive\s+guide.*?\n',
+    ]
+    for pattern in preamble_patterns:
+        content = re.sub(pattern, '', content, flags=re.IGNORECASE | re.MULTILINE)
+    return content.strip()
+
+
+# Keep this for backward compatibility with existing pages
 def parse_character_metadata(content: str) -> tuple[dict, str]:
     """
     Extract <!--META ... --> block from LLM output.
@@ -180,7 +386,6 @@ def parse_character_metadata(content: str) -> tuple[dict, str]:
             if not value:
                 continue
 
-            # Map to structured fields
             if key == "spirit":
                 metadata["spirit"] = value
             elif key == "aura":
@@ -207,12 +412,15 @@ def parse_character_metadata(content: str) -> tuple[dict, str]:
     if appearance:
         metadata["appearance"] = appearance
 
-    # Remove the META block from content
     clean_content = content[:match.start()] + content[match.end():]
     clean_content = clean_content.strip()
 
     return metadata, clean_content
 
+
+# ──────────────────────────────────────────────────────────
+# Main synthesis function
+# ──────────────────────────────────────────────────────────
 
 def synthesize_wiki_page(
     entity_name: str,
@@ -223,32 +431,26 @@ def synthesize_wiki_page(
 ) -> tuple[str, dict]:
     """
     Use the LLM to write a wiki article from source blocks.
+    The LLM outputs structured JSON, which is then converted to markdown.
     Returns (markdown_with_citations, metadata_dict).
     Falls back to structured verbatim layout if LLM fails.
     """
     source_text = format_source_blocks(items)
     metadata = {}
 
-    # Choose prompt based on entity type and size
+    # Choose prompt based on entity type
     if entity_type == "character":
-        prompt = CHARACTER_SYNTHESIS_PROMPT.format(
+        prompt = CHARACTER_JSON_PROMPT.format(
             entity_name=entity_name,
             source_blocks=source_text,
         )
     elif entity_type == "location":
-        prompt = LOCATION_SYNTHESIS_PROMPT.format(
+        prompt = LOCATION_JSON_PROMPT.format(
             entity_name=entity_name,
-            source_blocks=source_text,
-        )
-    elif len(items) > 20:
-        prompt = SYNTHESIS_PROMPT_LARGE.format(
-            entity_name=entity_name,
-            entity_type=entity_type,
-            block_count=len(items),
             source_blocks=source_text,
         )
     else:
-        prompt = SYNTHESIS_PROMPT.format(
+        prompt = GENERIC_JSON_PROMPT.format(
             entity_name=entity_name,
             entity_type=entity_type,
             source_blocks=source_text,
@@ -258,18 +460,38 @@ def synthesize_wiki_page(
         try:
             content = client.chat(
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
+                temperature=0.2,
                 max_tokens=4000,
-                json_mode=False,
+                json_mode=True,
             )
-            if content and len(content.strip()) > 50:
-                content = content.strip()
+            if not content or len(content.strip()) < 20:
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+                    continue
+                break
 
-                # Extract character metadata if present
+            data = extract_json_from_response(content)
+            if not data:
+                # JSON parse failed — try once more
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+                    continue
+                # Last resort: try to use as raw markdown (sanitized)
+                content = sanitize_content(content)
                 if entity_type == "character":
                     metadata, content = parse_character_metadata(content)
-
                 return content, metadata
+
+            # Convert JSON to markdown based on entity type
+            if entity_type == "character":
+                md, metadata = character_json_to_markdown(data)
+            elif entity_type == "location":
+                md, metadata = location_json_to_markdown(data)
+            else:
+                md, metadata = generic_json_to_markdown(data)
+
+            if md and len(md.strip()) > 30:
+                return md, metadata
 
         except Exception as e:
             if "rate_limit" in str(e).lower() or "429" in str(e):
