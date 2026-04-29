@@ -293,6 +293,10 @@ export function WikiPageView({ page: initialPage }: { page: WikiPage }) {
   const [validSlugs, setValidSlugs] = useState<Record<string, string>>({});
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [showMergeDialog, setShowMergeDialog] = useState(false);
+  const [merging, setMerging] = useState(false);
+  const [mergeSearch, setMergeSearch] = useState("");
+  const [mergeTarget, setMergeTarget] = useState<string | null>(null);
 
   const primaryImage = page.images?.find((img) => img.isPrimary);
   const allImages = page.images || [];
@@ -336,6 +340,37 @@ export function WikiPageView({ page: initialPage }: { page: WikiPage }) {
   const handleTypeUpdated = (newType: string) => {
     setPage((prev) => ({ ...prev, entityType: newType }));
   };
+
+  const handleMerge = async () => {
+    if (!mergeTarget) return;
+    setMerging(true);
+    try {
+      const res = await fetch(`/api/pages/${page.slug}/merge`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ targetSlug: mergeTarget }),
+      });
+      if (res.ok) {
+        window.location.href = `/wiki/${mergeTarget}`;
+      } else {
+        const data = await res.json();
+        alert(`Failed to merge: ${data.error || "Unknown error"}`);
+      }
+    } catch {
+      alert("Failed to merge pages");
+    } finally {
+      setMerging(false);
+      setShowMergeDialog(false);
+    }
+  };
+
+  // Filter pages for merge target picker (exclude current page)
+  const mergeOptions = Object.entries(validSlugs)
+    .filter(([slug]) => slug !== page.slug)
+    .filter(([, name]) =>
+      !mergeSearch || name.toLowerCase().includes(mergeSearch.toLowerCase())
+    )
+    .sort(([, a], [, b]) => a.localeCompare(b));
 
   const handleDelete = async () => {
     setDeleting(true);
@@ -391,6 +426,12 @@ export function WikiPageView({ page: initialPage }: { page: WikiPage }) {
             History
           </Link>
           <button
+            onClick={() => { setShowMergeDialog(true); setMergeSearch(""); setMergeTarget(null); }}
+            className="px-3 py-1.5 bg-yellow-100 text-yellow-800 rounded text-sm hover:bg-yellow-200"
+          >
+            Merge Into...
+          </button>
+          <button
             onClick={() => setShowDeleteConfirm(true)}
             className="px-3 py-1.5 bg-red-100 text-red-700 rounded text-sm hover:bg-red-200"
           >
@@ -398,6 +439,62 @@ export function WikiPageView({ page: initialPage }: { page: WikiPage }) {
           </button>
         </div>
       </div>
+
+      {/* Merge dialog */}
+      {showMergeDialog && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4 shadow-xl">
+            <h3 className="text-lg font-bold text-gray-900 mb-2">
+              Merge &ldquo;{page.entityName}&rdquo; Into Another Page
+            </h3>
+            <p className="text-gray-600 text-sm mb-3">
+              This will move all content, source chunks, images, and cross-links
+              from this page into the target page, then delete this page.
+            </p>
+            <input
+              type="text"
+              placeholder="Search for target page..."
+              value={mergeSearch}
+              onChange={(e) => setMergeSearch(e.target.value)}
+              className="w-full px-3 py-2 border rounded mb-2 text-sm"
+              autoFocus
+            />
+            <div className="max-h-48 overflow-y-auto border rounded mb-4">
+              {mergeOptions.length === 0 ? (
+                <div className="px-3 py-2 text-sm text-gray-400">No pages found</div>
+              ) : (
+                mergeOptions.slice(0, 50).map(([slug, name]) => (
+                  <button
+                    key={slug}
+                    onClick={() => setMergeTarget(slug)}
+                    className={`w-full text-left px-3 py-2 text-sm hover:bg-blue-50 ${
+                      mergeTarget === slug ? "bg-blue-100 font-medium" : ""
+                    }`}
+                  >
+                    {name}
+                  </button>
+                ))
+              )}
+            </div>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => setShowMergeDialog(false)}
+                className="px-4 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300"
+                disabled={merging}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleMerge}
+                className="px-4 py-2 bg-yellow-600 text-white rounded hover:bg-yellow-700 disabled:opacity-50"
+                disabled={merging || !mergeTarget}
+              >
+                {merging ? "Merging..." : "Merge"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Delete confirmation dialog */}
       {showDeleteConfirm && (

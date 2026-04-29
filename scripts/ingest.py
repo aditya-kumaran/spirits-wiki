@@ -492,6 +492,59 @@ def generate_cross_links(entity_blocks: dict, page_ids: dict):
         conn.close()
 
 
+def deduplicate_by_first_name(entity_blocks: dict) -> dict:
+    """
+    Merge entities that share the same first name into the longest (most complete) name.
+    Since all character first names are unique in this world, "John" and "John Smith Jr."
+    must be the same character. We keep the longest name and merge all blocks.
+    """
+    # Build a map: lowercase first name -> list of (full_name, items)
+    first_name_groups: dict[str, list[tuple[str, list]]] = {}
+    for name, items in entity_blocks.items():
+        if not name or " " not in name and len(name) < 2:
+            continue
+        first = name.split()[0].lower()
+        if first not in first_name_groups:
+            first_name_groups[first] = []
+        first_name_groups[first].append((name, items))
+
+    merged = {}
+    merged_names: set[str] = set()
+
+    for first, group in first_name_groups.items():
+        if len(group) <= 1:
+            # No duplicates for this first name
+            for name, items in group:
+                merged[name] = items
+            continue
+
+        # Multiple entities share this first name — merge into the longest name
+        # (longest = most complete / formal name)
+        group.sort(key=lambda x: len(x[0]), reverse=True)
+        canonical_name = group[0][0]
+        all_items = []
+        short_names = []
+        for name, items in group:
+            all_items.extend(items)
+            if name != canonical_name:
+                short_names.append(name)
+                merged_names.add(name)
+
+        merged[canonical_name] = all_items
+        if short_names:
+            print(f"    Dedup: merged {short_names} -> '{canonical_name}'")
+
+    # Add any single-word entities that weren't in a group
+    for name, items in entity_blocks.items():
+        if name not in merged and name not in merged_names:
+            merged[name] = items
+
+    if merged_names:
+        print(f"  Deduplicated {len(merged_names)} duplicate entities by first name")
+
+    return merged
+
+
 def ingest_document(file_path: Path, llm_client: LLMClient, min_blocks: int = 2, is_local_llm: bool = False, use_checkpoint: bool = True):
     """Ingest a single .docx file into the database."""
     ingestion_run_id = str(uuid.uuid4())
@@ -592,6 +645,11 @@ def ingest_document(file_path: Path, llm_client: LLMClient, min_blocks: int = 2,
             if entity_name not in entity_blocks:
                 entity_blocks[entity_name] = []
             entity_blocks[entity_name].append((block, classification))
+
+    # Step 3b: Deduplicate entities by first name.
+    # Since all character first names are unique, "John" and "John Smith Jr."
+    # are the same character. Merge shorter names into the longest matching name.
+    entity_blocks = deduplicate_by_first_name(entity_blocks)
 
     # Step 4: FILTER — only keep entities with enough blocks AND proper noun names
     filtered_entities = {}
