@@ -59,12 +59,12 @@ REQUIRED JSON SCHEMA:
 }}
 
 RULES:
-- Fill "metadata" fields from source material. Leave as "" if unknown.
+- Fill "metadata" fields by COPYING EXACTLY from the source material — do NOT rewrite, summarize, or paraphrase any metadata value. If the source says "Loki x Scar (Lion King)" for inspiration, write exactly that.
 - "overview": Write 1-2 paragraphs. Do NOT say "X is a character in the fictional world of Y" — just describe who they are directly.
 - "relationships": Object with era subheading keys. Use "_default" for content not tied to any era. Weave personality traits into relationship descriptions. Use [[Entity Name]] for wiki links.
 - "abilities": String. Set to "" if no abilities info exists.
 - "plot": Object with era subheading keys. Use "_default" for content not tied to any era. Organize chronologically within each era.
-- "references": Array of citation strings, one per footnote. Format: [^N]: **File.docx**, §Heading — "short quote"
+- REFERENCES ARE CRITICAL. Each reference MUST include the actual source filename, heading path, AND a direct quote from the source material. Do NOT just write "[REF-1]" — you must expand each [REF-N] tag into the full citation with the real filename and a real quote. Example: [^1]: **Spirits_Faces.docx**, §Characters > Devin — "possesses the Menora Cystium"
 - Every factual claim in overview/relationships/abilities/plot MUST have a [^N] citation.
 - Use [[Entity Name]] syntax to link to other entities.
 - Era keys in relationships and plot should match what the source material mentions (e.g., "Part One", "Golden Age (2000-3000)", "Age of Freedom"). Only include eras that have source material.
@@ -98,7 +98,7 @@ RULES:
 - "overview": 1-2 paragraphs. Do NOT say "X is a location in the fictional world of Y."
 - "geography", "culture", "notable_residents": Strings. Set to "" if no info.
 - "history": Object with era subheading keys. Use "_default" for non-era content.
-- "references": Array of citation strings.
+- REFERENCES ARE CRITICAL. Each reference MUST include the actual source filename, heading path, AND a direct quote from the source material. Do NOT just write "[REF-1]" — expand each into a full citation. Example: [^1]: **Nationalities.docx**, §Locations > Dubai — "a sprawling desert city"
 - Every factual claim MUST have a [^N] citation.
 - Use [[Entity Name]] to link to other entities.
 - Only include eras/sections that have source material.
@@ -126,7 +126,7 @@ REQUIRED JSON SCHEMA:
 RULES:
 - "overview": 1-2 paragraphs. Do NOT say "X is a Y in the fictional world of Z."
 - "sections": Object with section name keys. Choose appropriate section names for the entity type (e.g., History, Culture, Significance, Members, etc.). Only include sections with source material.
-- "references": Array of citation strings.
+- REFERENCES ARE CRITICAL. Each reference MUST include the actual source filename, heading path, AND a direct quote from the source material. Do NOT just write "[REF-1]" — expand each into a full citation. Example: [^1]: **Philosophies.docx**, §Concepts > Magic — "the fundamental force"
 - Every factual claim MUST have a [^N] citation.
 - Use [[Entity Name]] to link to other entities.
 
@@ -319,6 +319,76 @@ def format_source_blocks(items: list) -> str:
     return "\n".join(lines)
 
 
+def build_ref_lookup(items: list) -> dict[int, str]:
+    """Build a lookup from REF-N index to a properly formatted citation string."""
+    lookup = {}
+    for i, (block, classification) in enumerate(items, 1):
+        heading_str = " > ".join(block.heading_path) if block.heading_path else "(no heading)"
+        quote = block.text[:120].replace('"', "'")
+        if len(block.text) > 120:
+            quote += "..."
+        lookup[i] = f"**{block.doc_filename}**, §{heading_str} — \"{quote}\""
+    return lookup
+
+
+def fix_references(md: str, ref_lookup: dict[int, str]) -> str:
+    """
+    Post-process markdown to fix broken references.
+    - Replace bare [REF-N] in reference lines with actual source citations
+    - Replace references that are just "[REF-N]" with expanded text
+    - Ensure every [^N] reference line has actual source info
+    """
+    lines = md.split("\n")
+    result = []
+    in_references = False
+
+    for line in lines:
+        if re.match(r'^##\s*References?\s*$', line, re.IGNORECASE):
+            in_references = True
+            result.append(line)
+            continue
+
+        if in_references:
+            # Fix reference lines that just contain [REF-N] placeholders
+            # Pattern: [^1]: [REF-1] or [^1]: **[REF-1]** etc.
+            ref_line_match = re.match(r'^\[\^(\d+)\]:\s*(.*)', line)
+            if ref_line_match:
+                ref_num = int(ref_line_match.group(1))
+                ref_text = ref_line_match.group(2).strip()
+
+                # Check if the reference text is just REF-N placeholders
+                if re.match(r'^\[?REF-\d+\]?$', ref_text) or not ref_text or ref_text.startswith("[REF-"):
+                    # Extract the REF number from the text if present
+                    ref_id_match = re.search(r'REF-(\d+)', ref_text)
+                    ref_id = int(ref_id_match.group(1)) if ref_id_match else ref_num
+                    if ref_id in ref_lookup:
+                        result.append(f"[^{ref_num}]: {ref_lookup[ref_id]}")
+                        continue
+
+                # Also fix lines where REF-N appears anywhere in the citation
+                fixed_text = ref_text
+                for match in re.finditer(r'\[?REF-(\d+)\]?', ref_text):
+                    ref_id = int(match.group(1))
+                    if ref_id in ref_lookup:
+                        fixed_text = fixed_text.replace(match.group(0), ref_lookup[ref_id])
+                if fixed_text != ref_text:
+                    result.append(f"[^{ref_num}]: {fixed_text}")
+                    continue
+
+            # Fix standalone lines that are just "N. [REF-N]"
+            bare_match = re.match(r'^(\d+)\.\s*\[?REF-(\d+)\]?\s*$', line)
+            if bare_match:
+                num = bare_match.group(1)
+                ref_id = int(bare_match.group(2))
+                if ref_id in ref_lookup:
+                    result.append(f"[^{num}]: {ref_lookup[ref_id]}")
+                    continue
+
+        result.append(line)
+
+    return "\n".join(result)
+
+
 def extract_json_from_response(response: str) -> Optional[dict]:
     """
     Extract a JSON object from the LLM response.
@@ -436,6 +506,7 @@ def synthesize_wiki_page(
     Falls back to structured verbatim layout if LLM fails.
     """
     source_text = format_source_blocks(items)
+    ref_lookup = build_ref_lookup(items)
     metadata = {}
 
     # Choose prompt based on entity type
@@ -491,6 +562,8 @@ def synthesize_wiki_page(
                 md, metadata = generic_json_to_markdown(data)
 
             if md and len(md.strip()) > 30:
+                # Post-process: replace any [REF-N] placeholders with actual sources
+                md = fix_references(md, ref_lookup)
                 return md, metadata
 
         except Exception as e:

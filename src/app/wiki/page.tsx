@@ -19,16 +19,26 @@ function WikiIndexContent() {
   const searchParams = useSearchParams();
   const typeFilter = searchParams.get("type");
   const searchQuery = searchParams.get("q") || "";
+  const nameOnlyParam = searchParams.get("nameOnly") === "true";
+  const pageParam = parseInt(searchParams.get("page") || "1");
 
   const [pages, setPages] = useState<PageSummary[]>([]);
   const [total, setTotal] = useState(0);
+  const [currentPage, setCurrentPage] = useState(pageParam);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState(searchQuery);
+  const [nameOnly, setNameOnly] = useState(nameOnlyParam);
+  const pageSize = 50;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
   useEffect(() => {
+    setLoading(true);
     const params = new URLSearchParams();
     if (typeFilter) params.set("type", typeFilter);
     if (searchQuery) params.set("q", searchQuery);
+    if (nameOnlyParam) params.set("nameOnly", "true");
+    params.set("page", String(currentPage));
+    params.set("limit", String(pageSize));
 
     fetch(`/api/pages?${params.toString()}`)
       .then((r) => r.json())
@@ -38,15 +48,38 @@ function WikiIndexContent() {
         setLoading(false);
       })
       .catch(() => setLoading(false));
-  }, [typeFilter, searchQuery]);
+  }, [typeFilter, searchQuery, nameOnlyParam, currentPage]);
+
+  const navigateWithParams = (overrides: Record<string, string | null>) => {
+    const params = new URLSearchParams();
+    const current: Record<string, string | null> = {
+      type: typeFilter,
+      q: search || null,
+      nameOnly: nameOnly ? "true" : null,
+      page: "1",
+    };
+    const merged = { ...current, ...overrides };
+    for (const [k, v] of Object.entries(merged)) {
+      if (v) params.set(k, v);
+    }
+    window.history.pushState({}, "", `/wiki?${params.toString()}`);
+    window.location.reload();
+  };
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
+    navigateWithParams({
+      q: search || null,
+      nameOnly: nameOnly ? "true" : null,
+      page: "1",
+    });
+  };
+
+  const goToPage = (p: number) => {
     const params = new URLSearchParams(window.location.search);
-    if (search) params.set("q", search);
-    else params.delete("q");
+    params.set("page", String(p));
     window.history.pushState({}, "", `/wiki?${params.toString()}`);
-    window.location.reload();
+    setCurrentPage(p);
   };
 
   return (
@@ -66,13 +99,30 @@ function WikiIndexContent() {
 
       {/* Search */}
       <form onSubmit={handleSearch} className="mb-4">
-        <input
-          type="text"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search pages..."
-          className="w-full px-3 py-2 border border-[var(--color-wiki-border)] rounded text-sm"
-        />
+        <div className="flex gap-2">
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search pages..."
+            className="flex-1 px-3 py-2 border border-[var(--color-wiki-border)] rounded text-sm"
+          />
+          <button
+            type="submit"
+            className="px-4 py-2 bg-[var(--color-wiki-accent)] text-white rounded text-sm hover:bg-[var(--color-wiki-accent-hover)]"
+          >
+            Search
+          </button>
+        </div>
+        <label className="flex items-center gap-2 mt-2 text-sm text-gray-600 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={nameOnly}
+            onChange={(e) => setNameOnly(e.target.checked)}
+            className="rounded"
+          />
+          Search article names only
+        </label>
       </form>
 
       {/* Type filters */}
@@ -137,6 +187,29 @@ function WikiIndexContent() {
               </div>
             </Link>
           ))}
+        </div>
+      )}
+
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div className="flex items-center justify-center gap-2 mt-6">
+          <button
+            onClick={() => goToPage(currentPage - 1)}
+            disabled={currentPage <= 1}
+            className="px-3 py-1.5 bg-gray-200 text-gray-700 rounded text-sm hover:bg-gray-300 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Previous
+          </button>
+          <span className="text-sm text-gray-600">
+            Page {currentPage} of {totalPages}
+          </span>
+          <button
+            onClick={() => goToPage(currentPage + 1)}
+            disabled={currentPage >= totalPages}
+            className="px-3 py-1.5 bg-gray-200 text-gray-700 rounded text-sm hover:bg-gray-300 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Next
+          </button>
         </div>
       )}
     </div>
