@@ -1,0 +1,41 @@
+{
+  "name": "spirits-wiki",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "postinstall": "prisma generate"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "@tailwindcss/postcss": "^4.2.2",
+    "@types/node": "^25.6.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@uiw/react-md-editor": "^4.1.0",
+    "@vercel/blob": "^2.3.3",
+    "autoprefixer": "^10.5.0",
+    "diff": "^9.0.0",
+    "groq-sdk": "^1.1.2",
+    "next": "^14.2.35",
+    "next-auth": "^4.24.14",
+    "postcss": "^8.5.10",
+    "prisma": "^5.22.0",
+    "react": "^18.3.1",
+    "react-diff-viewer-continued": "^4.2.0",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^10.1.0",
+    "rehype-raw": "^7.0.0",
+    "remark-gfm": "^4.0.1",
+    "slugify": "^1.6.9",
+    "tailwindcss": "^4.2.2",
+    "typescript": "^6.0.3"
+  }
+}
